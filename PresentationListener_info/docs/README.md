@@ -225,10 +225,10 @@ ExportSession["lecture_notes"]
 
 | ファイル | 内容 |
 |----------|------|
-| [api.md](PresentationListener_info/docs/api.md) | 全公開関数のシグネチャ・オプション・戻り値リファレンス |
-| [setup.md](PresentationListener_info/docs/setup.md) | 動作要件・インストール手順・ffmpeg 検出・API キー設定・トラブルシューティング |
-| [user_manual.md](PresentationListener_info/docs/user_manual.md) | パレット操作・音声質問・発表言語と出力言語・各関数の詳細な使用方法 |
-| [examples/example.md](PresentationListener_info/docs/examples/example.md) | 代表的な使用パターン集 (8 例) |
+| [api.md](api.md) | 全公開関数のシグネチャ・オプション・戻り値リファレンス |
+| [setup.md](setup.md) | 動作要件・インストール手順・ffmpeg 検出・API キー設定・トラブルシューティング |
+| [user_manual.md](user_manual.md) | パレット操作・音声質問・発表言語と出力言語・各関数の詳細な使用方法 |
+| [examples/example.md](examples/example.md) | 代表的な使用パターン集 (8 例) |
 
 ## 使用例・デモ
 

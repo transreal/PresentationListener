@@ -1,0 +1,13 @@
+{
+	"packageName":"PresentationListener",
+	"files":[
+		"PresentationListener.wl"
+	],
+	"directories":[
+		"PresentationListener_info"
+	],
+	"excludePatterns":[
+		"PresentationListener_info\/history\/",
+		"PresentationListener_info\/references\/"
+	]
+}
