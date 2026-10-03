@@ -1,6 +1,6 @@
 # PresentationListener
 
-音声録音 (ffmpeg) → Whisper 書き起こし → Claude 解説生成 → Mathematica ノートブック記録 を自動化するパッケージです。発表言語は日本語に限らず、解説は出力言語 (`$Language`) で生成され、発言が別言語なら訳も併記されます。聴衆からの質問を発表者へ声で伝え、声の回答を文字で残す **音声質問 (Voice Q)** にも対応しています。
+音声録音 (ffmpeg) → Whisper 書き起こし → Claude 解説生成 → Mathematica ノートブック記録 を自動化するパッケージです。発表言語は日本語に限らず、解説は出力言語 (`$Language`) で生成され、発言が別言語なら訳も併記されます。聴衆からの質問を発表者へ声で伝え、声の回答を文字で残す **音声質問 (Voice Q)** にも対応しています。Web カメラを使わず音声だけを収録する **音声のみモード** も選べます。
 
 ## 設計思想と実装の概要
 
@@ -14,9 +14,13 @@ PresentationListener は、「講義・プレゼンテーションの場にお�
 
 録音は ffmpeg の `-f segment` オプションによって一定秒数 (既定 60 秒) ごとのセグメント WAV ファイルとして継続的に出力されます。1 秒ごとに実行される `tick[]` スケジュールタスクがセグメントの完成を検出し、Whisper (OpenAI API) に送信して書き起こしを取得します。累積文字数がしきい値 (`MinParagraphLength`、既定 80 文字) を超えた段階で Claude に解説生成を依頼し、結果を [NBAccess](https://github.com/transreal/NBAccess) 経由でノートブックのセルとして書き込みます。
 
-映像デバイスが設定されている場合は DirectShow 経由でスライドのフレームキャプチャも行い、フレーム間差分 (`SlideThreshold`) でスライドが切り替わったことを検出して画像を Claude に添付することで、より文脈に即した解説を生成します。
+映像デバイスが設定されている場合は DirectShow 経由でスライドのフレームキャプチャも行い、フレーム間差分 (`SlideThreshold`) でスライドが切り替わったことを検出して画像を Claude に添付することで、より文脈に即した解説を生成します。カメラが不要・使えない場合は **音声のみ** モードに切り替えられ、その間はカメラを開かず、スライドのキャプチャや差分判定も行いません。
 
 ffmpeg の実行ファイルは PATH だけに頼らず、`$FFmpegPath`、PATH、既知のインストール先 (WinGet / scoop / Chocolatey など) の順に自動検出されます。winget で導入した直後で PATH が未反映の Mathematica セッションでも、再起動なしで利用できます。
+
+### 収録モード (画像+音声 / 音声のみ)
+
+既定は音声に加えてスライド画像を収録する「画像+音声」です。`"AudioOnly"` オプション、`$ListenerAudioOnly` 変数、`ListenerSetAudioOnly[]`、パレットの「収録」ボタンで切り替えられ、録音中でも切り替え可能です。音声のみで開始しても、解決済みの映像デバイスは保持されるため、途中で画像+音声へ戻せます。切り替えの履歴はノートブックに小さく記録されます。
 
 ### 多言語対応
 
@@ -163,9 +167,11 @@ ExportSession["lecture_notes"]
 |--------|--------|------|
 | `$plFastMode` | `True` | 高速モード (curl 直接) の有効/無効 |
 | `$plSVSync` | `True` | SourceVault 同期の有効/無効 |
+| `$ListenerAudioOnly` | `False` | `True` で Web カメラを使わず音声のみ収録 |
 | `$FFmpegPath` | (未設定) | ffmpeg 実行ファイルの明示パス |
 | `"Language"` | `Automatic` | 発表言語 (ISO コードまたは言語名。Automatic で Whisper が自動判定) |
 | `"OutputLanguage"` | `Automatic` | 解説・Q&A・タイトルの出力言語 (Automatic で `$Language`) |
+| `"AudioOnly"` | `Automatic` | `True` で音声のみ、`False` で画像+音声 (Automatic は `$ListenerAudioOnly` の現在値) |
 | `"ChunkDuration"` | `60` | 録音セグメント長 (秒) |
 | `"MinParagraphLength"` | `80` | 解説生成を起動する累積文字数しきい値 |
 | `"CaptureInterval"` | `15` | スライドキャプチャ間隔 (秒) |
@@ -181,6 +187,11 @@ ExportSession["lecture_notes"]
 - **`StartListener[opts]`** — 音声録音・書き起こし・AI 解説セッションを開始します。ffmpeg で連続録音し、1 秒ごとの tick で Whisper → Claude パイプラインを駆動します。新規ノートブックを作成して解説を書き込みます。
 - **`StopListener[]`** — 録音プロセスと非同期 LLM を停止し、音声質問セッションも閉じ、一時ファイルを削除します。未保存ノートブックを既定名で保存し、SourceVault に即時インデックス化します。
 - **`ResumeListener[]`** — `StopListener[]` 後に同じデバイス・設定で録音を再開します。ノートブックと書き起こしは引き継がれます。
+
+#### 収録モード
+
+- **`ListenerSetAudioOnly[True | False]`** — 音声のみ / 画像+音声の収録を切り替えます。引数なしで現在の状態を反転します。録音中でも使用でき、切り替えはノートブックに記録されます。
+- **`$ListenerAudioOnly`** — 収録モードの現在値です。パレットの「収録」ボタンや `StartListener` の `"AudioOnly"` オプションとも連動します。
 
 #### クエリ & エクスポート
 
@@ -204,12 +215,12 @@ ExportSession["lecture_notes"]
 
 - **`ListAudioDevices[]`** — DirectShow 経由で利用可能な音声デバイスの一覧を返します。
 - **`ListVideoDevices[]`** — DirectShow 経由で利用可能な映像デバイスの一覧を返します。
-- **`CaptureNow[]`** — 現在のフレームを即時キャプチャしてスライドバッファに追加します。
+- **`CaptureNow[]`** — 現在のフレームを即時キャプチャしてスライドバッファに追加します。音声のみ収録中は使用できません。
 - **`ShowSettings[]`** — デバイス選択・キャプチャ間隔・スライドしきい値の設定ダイアログを開き、選択を保存して現在の設定を Association で返します。ffmpeg 未検出やデバイス一覧が空の場合は理由も表示されます。
 
 #### 状態確認 & パレット
 
-- **`ShowPalette[]`** — コントロールパレットを表示します。Start / Stop / Capture / Question / Voice Q / Process Cells ボタン、モード・モデル・エフォート・課金 API 許可の切替、Settings、Diagnostics を備えます。Palettes メニューの **Presentation Listener** からも起動できます。
+- **`ShowPalette[]`** — コントロールパレットを表示します。Start / Stop / Capture / Question / Voice Q / Process Cells ボタン、収録モード (画像+音声 / 音声のみ)・処理モード・モデル・エフォート・課金 API 許可の切替、Settings、Diagnostics を備えます。Palettes メニューの **Presentation Listener** からも起動できます。
 - **`ListenerStatus[]`** — 現在の状態を人間が読める文字列で返します (`"Recording [00:03:42]"` または `"Stopped"`)。
 - **`ListenerRunningQ[]`** — 現在録音中かどうかを `True` / `False` で返します。
 - **`ListenerSourceVaultSession[]`** — 現在の SourceVault セッション ID を返します (同期 OFF・未開始なら `None`)。
@@ -227,7 +238,7 @@ ExportSession["lecture_notes"]
 |----------|------|
 | [api.md](PresentationListener_info/docs/api.md) | 全公開関数のシグネチャ・オプション・戻り値リファレンス |
 | [setup.md](PresentationListener_info/docs/setup.md) | 動作要件・インストール手順・ffmpeg 検出・API キー設定・トラブルシューティング |
-| [user_manual.md](PresentationListener_info/docs/user_manual.md) | パレット操作・音声質問・発表言語と出力言語・各関数の詳細な使用方法 |
+| [user_manual.md](PresentationListener_info/docs/user_manual.md) | パレット操作・収録モード・音声質問・発表言語と出力言語・各関数の詳細な使用方法 |
 | [examples/example.md](PresentationListener_info/docs/examples/example.md) | 代表的な使用パターン集 (8 例) |
 
 ## 使用例・デモ
@@ -257,6 +268,17 @@ StartListener[
   "AutoCropSlide"  -> True,
   "SlideMaxWidth"  -> 800
 ]
+```
+
+### 例: 音声のみで収録する
+
+```mathematica
+(* カメラを開かず音声だけを収録・処理する *)
+StartListener["AudioOnly" -> True]
+
+(* 収録中に画像+音声へ戻す / 再び音声のみにする *)
+ListenerSetAudioOnly[False]
+ListenerSetAudioOnly[True]
 ```
 
 ### 例: 英語の発表を日本語で解説する

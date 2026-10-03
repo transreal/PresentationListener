@@ -161,7 +161,7 @@ ListAudioDevices[]
 ShowSettings[]
 ```
 
-`ListAudioDevices[]` lists the DirectShow devices that ffmpeg returns. Use `ShowSettings[]` to choose the microphone and camera. When the list is empty, the message explains why (ffmpeg not found, or ffmpeg returned no dshow devices).
+`ListAudioDevices[]` lists the DirectShow devices that ffmpeg returns. Use `ShowSettings[]` to choose the microphone and camera, and to switch between recording images + audio and audio only. When the list is empty, the message explains why (ffmpeg not found, or ffmpeg returned no dshow devices).
 
 ### Minimal operation test
 
@@ -181,15 +181,37 @@ StartListener[
   "VideoDevice" -> Automatic,       (* video device; None disables slide capture *)
   "Language" -> Automatic,          (* language of the talk; Automatic = Whisper auto-detects *)
   "OutputLanguage" -> Automatic,    (* language of titles/commentary/Q&A; Automatic = $Language *)
+  "AudioOnly" -> Automatic,         (* True = audio only (no camera); False = images + audio; Automatic = keep $ListenerAudioOnly *)
   "NotebookFolder" -> Automatic     (* where the SourceVault notebook is saved *)
 ]
 ```
 
 - **`"Language"`** is the language of the talk. It can be a language name such as `"English"` or `"Japanese"`, or a two- or three-letter ISO code. With `Automatic`, no `language` parameter is sent and Whisper detects the language. The default is `Automatic`.
 - **`"OutputLanguage"`** is the language of titles, commentary and Q&A answers. With `Automatic`, it uses `$Language`. If the speech is in a different language, a translation of it is added to the commentary at no extra API call.
+- **`"AudioOnly"`** selects audio-only recording. With `True`, the camera is not opened and only the audio is recorded and processed. With `False`, images and audio are recorded. With `Automatic` (the default), the current value of `$ListenerAudioOnly` is kept. See [Audio-only recording](#audio-only-recording).
 - **`"NotebookFolder"`** is where the new notebook is saved as `yyyymmdd-<title>-presentation.nb` once its title is known. With `Automatic`, the folder is resolved from SourceVault's default notebook folder, then `$onWork`, then `$packageDirectory`.
 
 For the other options (`"ChunkDuration"`, `"MinParagraphLength"`, `"CaptureInterval"`, `"SlideThreshold"`, `"SourceVaultSync"`, `"AutoCropSlide"`, `"SlideMaxWidth"`) the defaults work without changes.
+
+---
+
+## Audio-only recording
+
+By default the listener records audio and also captures slide images from a webcam. If you do not need images, or no camera is connected, you can record audio only.
+
+- **`$ListenerAudioOnly`** — when `True`, the webcam is not used and only audio is recorded and processed. The default is `False` (images + audio).
+- **`StartListener["AudioOnly" -> True]`** sets `$ListenerAudioOnly` at start. The video device that was resolved is remembered, so you can switch back to images + audio later in the same session.
+- **`ListenerSetAudioOnly[True | False]`** switches between audio-only and images + audio. It also works while recording; the change takes effect from the next capture. When switching back to images, the slide-difference detection is reset.
+- **`ListenerSetAudioOnly[]`** with no argument toggles the current mode.
+- The palette **Settings** section has a **Recording: images + audio / audio only** toggle that does the same thing.
+
+```mathematica
+ListenerSetAudioOnly[True]    (* audio only *)
+ListenerSetAudioOnly[False]   (* images + audio *)
+ListenerSetAudioOnly[]        (* toggle *)
+```
+
+If no video device is found, the listener runs audio only. Switching to images + audio then reports that there is no video device. `DiagState[]` shows the video state as `ON`, `OFF 音声のみ` (audio only), or `OFF`.
 
 ---
 
@@ -231,6 +253,8 @@ ListenerSourceVaultSession[]
 | Device names appear garbled (for example the Japanese "マイク") | The package repairs ffmpeg's UTF-8 device names automatically. Reload the package if you still see garbled names |
 | Only 🔧 standard mode is used, not ⚡ fast mode | Allow the billing API in the palette (`ShowPalette[]`), and check the Anthropic key |
 | The commentary or translation is not in the expected language | Set `"Language"` (language of the talk) and `"OutputLanguage"` (language of the output) explicitly |
+| No slide images are captured | Check whether `$ListenerAudioOnly` is `True` (switch with `ListenerSetAudioOnly[False]` or the palette toggle), and that a camera is selected in `ShowSettings[]` |
+| `ListenerSetAudioOnly[False]` reports "No video device." | No camera was resolved. Connect one and select it in `ShowSettings[]`, then restart the listener |
 | curl not found error | Run `curl --version` in PowerShell and check that curl is on the path |
 | The palette does not appear | Check that `NBAccess` loads correctly with `Needs["NBAccess`"]` |
 | `VoiceQuestion` does not work | Check that SourceVault and SourceVault_realtime are installed and loaded |

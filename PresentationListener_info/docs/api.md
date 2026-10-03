@@ -3,11 +3,12 @@
 ### StartListener[opts]
 音声録音・書き起こし・AI 解説セッションを開始する。ffmpeg で連続録音し、1 秒ごとの tick で Whisper→Claude パイプラインを駆動する。新規ノートブックを作成して解説を書き込む。タイトルが読み取れた時点でノートブックを SourceVault フォルダへ `yyyymmdd-<タイトル>-presentation.nb` として保存・参照登録する。
 → "Started." (成功) | "Already running." | エラーメッセージ文字列 (失敗; `$lastStartMsg` にも格納)
-Options: "Device" -> Automatic (音声デバイス名。Automatic なら `$cfgDevice`、それも Automatic なら既定マイクを自動解決; `ListAudioDevices[]` で一覧), "VideoDevice" -> Automatic (映像デバイス名。Automatic なら `$cfgVideoDevice`、それが Automatic なら最初の映像デバイス。None で映像なし; `ListVideoDevices[]` で一覧), "Language" -> Automatic (発表言語。Automatic で Whisper が自動判定。"ja" / "en" などの ISO コード、または "English" などの言語名), "OutputLanguage" -> Automatic (タイトル・解説・Q&A の出力言語。Automatic で `$Language`。発言が別言語なら訳も併記), "ChunkDuration" -> 60 (録音セグメント長 [秒]), "MinParagraphLength" -> 80 (解説生成を起動する累積文字数しきい値), "CaptureInterval" -> 15 (スライドキャプチャ間隔 [秒]), "SlideThreshold" -> 0.08 (フレーム間差分でスライド変化を検出するしきい値 0–1), "SourceVaultSync" -> True (SourceVault への同期記録), "AutoCropSlide" -> False (True で室内スクリーン領域を自動クロップ; 誤検出リスクあり), "SlideMaxWidth" -> 1280 (スライド画像の最大幅 [px]), "NotebookFolder" -> Automatic (保存先フォルダ。Automatic で `SourceVault`$SourceVaultDefaultNotebookFolder` → `$onWork` → `$packageDirectory` の順で解決)
+Options: "Device" -> Automatic (音声デバイス名。Automatic なら `$cfgDevice`、それも Automatic なら既定マイクを自動解決; `ListAudioDevices[]` で一覧), "VideoDevice" -> Automatic (映像デバイス名。Automatic なら `$cfgVideoDevice`、それが Automatic なら最初の映像デバイス。None で映像なし; `ListVideoDevices[]` で一覧), "Language" -> Automatic (発表言語。Automatic で Whisper が自動判定。"ja" / "en" などの ISO コード、または "English" などの言語名), "OutputLanguage" -> Automatic (タイトル・解説・Q&A の出力言語。Automatic で `$Language`。発言が別言語なら訳も併記), "AudioOnly" -> Automatic (True で音声のみ: カメラを開かない。False で画像+音声。Automatic なら `$ListenerAudioOnly` の現在値を維持。解決済みの映像デバイスは保持され、途中で画像+音声へ戻せる), "ChunkDuration" -> 60 (録音セグメント長 [秒]), "MinParagraphLength" -> 80 (解説生成を起動する累積文字数しきい値), "CaptureInterval" -> 15 (スライドキャプチャ間隔 [秒]), "SlideThreshold" -> 0.08 (フレーム間差分でスライド変化を検出するしきい値 0–1), "SourceVaultSync" -> True (SourceVault への同期記録), "AutoCropSlide" -> False (True で室内スクリーン領域を自動クロップ; 誤検出リスクあり), "SlideMaxWidth" -> 1280 (スライド画像の最大幅 [px]), "NotebookFolder" -> Automatic (保存先フォルダ。Automatic で `SourceVault`$SourceVaultDefaultNotebookFolder` → `$onWork` → `$packageDirectory` の順で解決)
 失敗条件: ffmpeg 未検出 / 音声デバイス未解決 / OpenAI キー未登録または取得拒否 / 一時ディレクトリ作成失敗 / 録音プロセス起動失敗
 例: `StartListener["Device" -> "audio=Microphone Array", "VideoDevice" -> None, "Language" -> "en"]`
 例: `StartListener["VideoDevice" -> "OBS Virtual Camera", "AutoCropSlide" -> True, "SlideMaxWidth" -> 800]`
 例: `StartListener["Language" -> "English", "OutputLanguage" -> "Japanese"]`
+例: `StartListener["AudioOnly" -> True]`
 
 ### StopListener[] → "Stopped."
 録音プロセスと非同期 LLM を停止し、`VoiceQuestionStop[]` で音声質問セッションも閉じ、一時ファイルを削除する。未保存ノートブックを既定名 "presentation" で保存し、SourceVault に即時 index 化する。
@@ -116,6 +117,10 @@ SourceVault セッション ID。`StartListener` 実行時に `"presentation-<YY
 ### $plSVSync
 型: Boolean, 初期値: True
 False にすると SourceVault への書き込みを全て無効化する。`StartListener["SourceVaultSync" -> False]` で設定される。
+
+### $ListenerAudioOnly
+型: Boolean, 初期値: False
+True なら映像デバイスを開かず音声のみで動作する。`StartListener["AudioOnly" -> True | False]` で設定される (Automatic は現在値を維持)。
 
 ### $cfgDevice
 型: String | Automatic, 初期値: Automatic

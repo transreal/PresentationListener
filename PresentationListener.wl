@@ -34,6 +34,8 @@
 (*  v23 (2026-09-27): VoiceQuestion (パレット「🎤 Voice Q」)。       *)
 (*    質問を発表者の言語で音声読み上げ (SourceVault_realtime、       *)
 (*    SlideWorkflow と同じ gpt-live)、声の回答を $Language で出力。   *)
+(*  v23b (2026-10-02): パレット「収録: 画像+音声 / 音声のみ」トグル  *)
+(*    ($ListenerAudioOnly / ListenerSetAudioOnly、収録中も切替可)。   *)
 (* ============================================================ *)
 
 Block[{$CharacterEncoding = "UTF-8"},
@@ -60,6 +62,8 @@ TestWhisper::usage = "TestWhisper[wavFile]";
 TestVideo::usage = "TestVideo[device]";
 DiagState::usage = "DiagState[]";
 ProcessCells::usage = "ProcessCells[\"prompt\"]";
+$ListenerAudioOnly::usage = "$ListenerAudioOnly は True なら Web カメラを使わず音声だけを収録・処理する (既定 False = 画像と音声)。パレット「設定」の「収録: …」で切り替えられ、収録中に切り替えると次のキャプチャから効く。StartListener の \"AudioOnly\" で開始時に指定もできる。";
+ListenerSetAudioOnly::usage = "ListenerSetAudioOnly[True|False] は音声のみ収録 / 画像と音声の収録を切り替える (収録中も可)。ListenerSetAudioOnly[] は切り替え (トグル)。";
 VoiceQuestion::usage = "VoiceQuestion[\"質問\"] は質問を発表者の言語へ訳して音声 (SourceVault_realtime の gpt-live / gpt-realtime) で読み上げ、発表者の声の回答を書き起こして $Language (\"OutputLanguage\") へ訳したテキストセルとして出力する (非ブロック)。パレットの「🎤 Voice Q」と同じ。SourceVault のロードとパレットの「課金API: 許可」が要る。";
 VoiceQuestionFinish::usage = "VoiceQuestionFinish[] は回答の聞き取りを今の時点で打ち切って出力する (パレットでは回答待ちの間ボタンが「✓ 回答を確定」になる)。";
 VoiceQuestionStop::usage = "VoiceQuestionStop[] は音声質問を中止し、自分で開いた音声セッションを閉じる。";
@@ -73,6 +77,7 @@ $FFmpegPath::usage = "$FFmpegPath は使う ffmpeg.exe のフルパス。Automat
 
 If[!ValueQ[$FFmpegPath], $FFmpegPath = Automatic];
 If[!ValueQ[$VoiceQuestionModel], $VoiceQuestionModel = Automatic];
+If[!ValueQ[$ListenerAudioOnly], $ListenerAudioOnly = False];
 If[!ValueQ[$VoiceQuestionSilence], $VoiceQuestionSilence = 5];
 If[!ValueQ[$VoiceQuestionNoAnswerSeconds], $VoiceQuestionNoAnswerSeconds = 40];
 If[!ValueQ[$VoiceQuestionMaxSeconds], $VoiceQuestionMaxSeconds = 180];
@@ -123,7 +128,7 @@ $pSt = "idle";
 (* 高速: "idle"→"transcribing"→"correcting"→"commenting"→"idle"
    標準: "idle"→"transcribing"→"llmBusy"→"idle" *)
 
-$vidDev = None; $slideCount = 0; $slideBuffer = {}; $pSlides = {};
+$vidDev = None; $vidDevSaved = None; $slideCount = 0; $slideBuffer = {}; $pSlides = {};
 $prevFrameImg = None; $lastCapTime = None; $captureIntv = 15; $slideThresh = 0.08;
 (* スライド自動クロップは既定 OFF。ON にすると「室内のスクリーン」を切り出すが、
    左側テキスト等の肝心な部分を切り落とす恐れがあるため、確信できる場合のみ。 *)
@@ -498,7 +503,9 @@ tickVideo[] := Module[{now, frameFile, slide, b64},
     $prevFrameImg = slide]]
 
 CaptureNow[] := Module[{frameFile, slide, b64, msg},
-  If[!$running, Return["Not running."]]; If[$vidDev === None, Return["No video device."]];
+  If[!$running, Return["Not running."]];
+  If[$vidDev === None, Return[If[TrueQ[$ListenerAudioOnly],
+    "音声のみ収録中です (パレットの「収録」で画像+音声に切り替え)。", "No video device."]]];
   frameFile = captureFrame[]; If[frameFile === None, Return["Capture failed."]];
   slide = detectSlide[frameFile]; If[!ImageQ[slide], Return["Failed."]];
   b64 = imageToBase64[slide]; If[!StringQ[b64], Return["Base64 failed."]];
@@ -938,7 +945,7 @@ Module[{n, title, bodyText, cells, commentary, translation},
 (* ============================================================ *)
 
 Options[StartListener] = {"Device" -> Automatic, "VideoDevice" -> Automatic,
-  "Language" -> Automatic, "OutputLanguage" -> Automatic,
+  "Language" -> Automatic, "OutputLanguage" -> Automatic, "AudioOnly" -> Automatic,
   "ChunkDuration" -> 60, "MinParagraphLength" -> 80,
   "CaptureInterval" -> 15, "SlideThreshold" -> 0.08, "SourceVaultSync" -> True,
   "AutoCropSlide" -> False, "SlideMaxWidth" -> 1280, "NotebookFolder" -> Automatic};
@@ -969,6 +976,10 @@ StartListener[OptionsPattern[]] := Module[{d, vd, k},
   (* 未指定(Automatic)なら設定済み映像デバイス ($cfgVideoDevice) を使う。
      映像を使わないときは明示的に "VideoDevice"->None を渡す。 *)
   If[vd === Automatic, vd = resolveVideoDevice[$cfgVideoDevice]];
+  (* 音声のみ: カメラは開かない。解決したデバイスは途中で画像+音声へ戻すときのために残す *)
+  If[BooleanQ[OptionValue["AudioOnly"]], $ListenerAudioOnly = OptionValue["AudioOnly"]];
+  $vidDevSaved = vd;
+  If[TrueQ[$ListenerAudioOnly], vd = None];
   $lang = OptionValue["Language"]; $outLang = OptionValue["OutputLanguage"];
   $chunkSec = OptionValue["ChunkDuration"];
   $minPara = OptionValue["MinParagraphLength"];
@@ -997,7 +1008,7 @@ StartListener[OptionsPattern[]] := Module[{d, vd, k},
     If[effectiveFastMode[], "⚡curl直接", "🔧CLI優先"] <> ", lang=" <>
     ToString[Replace[plWhisperLang[$lang], None -> "auto"]] <> "→" <> plOutLang[] <> ", billing=" <>
     If[billingAllowed[], "ON", "OFF"] <> ", video=" <>
-    If[vd =!= None, "ON", "OFF"] <> ")",
+    Which[vd =!= None, "ON", TrueQ[$ListenerAudioOnly], "OFF 音声のみ", True, "OFF"] <> ")",
     "Text", FontColor -> RGBColor[0.1, 0.5, 0.1], FontWeight -> Bold]];
   If[plSVAvailableQ[],
     wr[Cell["SourceVault session: " <> $plSVSession <>
@@ -1606,6 +1617,11 @@ ShowPalette[] := Module[{srcNB},
       Spacer[2],
       Style[" 設定", Bold, 8, GrayLevel[0.3]],
       Dynamic[Button[
+        Style["収録: " <> If[TrueQ[$ListenerAudioOnly], "音声のみ", "画像+音声"], 9, Bold,
+          If[TrueQ[$ListenerAudioOnly], RGBColor[0.45, 0.3, 0.6], GrayLevel[0.2]]],
+        ListenerSetAudioOnly[], Appearance -> "Frameless", Method -> "Queued"],
+        TrackedSymbols :> {$ListenerAudioOnly}],
+      Dynamic[Button[
         Style[If[effectiveFastMode[], "⚡ 高速", "🔧 標準"],
           9, Bold, If[effectiveFastMode[], RGBColor[0.8, 0.5, 0], GrayLevel[0.3]]],
         If[billingAllowed[], $plFastMode = !TrueQ[$plFastMode], $plFastMode = False],
@@ -1659,6 +1675,22 @@ ShowPalette[] := Module[{srcNB},
     WindowTitle -> "Listener", WindowSize -> {105, All},
     WindowFloating -> True, WindowClickSelect -> False,
     WindowMargins -> {{Automatic, 4}, {Automatic, 4}}, Saveable -> False]]
+
+(* 収録中の切り替えは $vidDev の付け外しだけで済む (tickVideo/captureFrame は
+   $vidDev === None なら何もしない)。画像へ戻すときは差分判定を初期化する。 *)
+ListenerSetAudioOnly[] := ListenerSetAudioOnly[!TrueQ[$ListenerAudioOnly]]
+ListenerSetAudioOnly[b : (True | False)] := Module[{vd},
+  $ListenerAudioOnly = b;
+  If[!$running, Return[If[b, "音声のみ", "画像+音声"]]];
+  If[b,
+    $vidDev = None,
+    vd = If[StringQ[$vidDevSaved], $vidDevSaved, resolveVideoDevice[$cfgVideoDevice]];
+    $vidDevSaved = vd; $vidDev = vd;
+    $prevFrameImg = None; $lastCapTime = None];
+  wr[Cell[ts[] <> " - 収録: " <> Which[b, "音声のみ", $vidDev =!= None, "画像+音声",
+      True, "画像+音声 (映像デバイスが見つからないため音声のみ)"],
+    "Text", FontColor -> GrayLevel[0.45], FontSize -> 10]];
+  If[b, "音声のみ", If[$vidDev =!= None, "画像+音声", "映像デバイスなし"]]]
 
 ListenerStatus[] := If[$running, "Recording [" <> elapsed[] <> "]", "Stopped"]
 ListenerRunningQ[] := $running
