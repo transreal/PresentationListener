@@ -36,6 +36,9 @@
 (*    SlideWorkflow と同じ gpt-live)、声の回答を $Language で出力。   *)
 (*  v23b (2026-10-02): パレット「収録: 画像+音声 / 音声のみ」トグル  *)
 (*    ($ListenerAudioOnly / ListenerSetAudioOnly、収録中も切替可)。   *)
+(*  v23c (2026-10-14): パレット設定欄に「マイク: / カメラ: 」を表示。 *)
+(*    停止中は Settings から解決した入力デバイス、収録中は実際に開いて *)
+(*    いるデバイス。解決は開く時と Settings OK 時だけ (Dynamic 内禁止)。*)
 (* ============================================================ *)
 
 Block[{$CharacterEncoding = "UTF-8"},
@@ -661,6 +664,9 @@ DiagState[] := Column[{
   "lang: " <> ToString[Replace[plWhisperLang[$lang], None -> "auto"]] <>
     " → output: " <> plOutLang[],
   "dev: " <> ToString[$dev], "vidDev: " <> ToString[$vidDev],
+  "cfgDevice: " <> ToString[$cfgDevice] <> " / cfgVideoDevice: " <> ToString[$cfgVideoDevice],
+  "paletteDevices: " <> ToString[Lookup[$plDevLabels, "Audio", None]] <>
+    " / " <> ToString[Lookup[$plDevLabels, "Video", None]],
   "slides: " <> ToString[Length[$slideBuffer]],
   "buf: " <> ToString[StringLength[$buf]] <> "c",
   "transcript: " <> ToString[StringLength[$transcript]] <> "c",
@@ -1517,6 +1523,58 @@ resolveVideoDevice[Automatic] := Module[{vdevs}, vdevs = ListVideoDevices[];
 resolveVideoDevice[""] := None; resolveVideoDevice[None] := None
 resolveVideoDevice[id_String] := id
 
+(* ---- パレットの「マイク / カメラ」表示 (v23c) ----
+   開始前に取り違えを防ぐため、いま効いている入力デバイスをパレットの設定欄に出す。
+   デバイス解決は ffmpeg (-list_devices) と powershell (既定マイク) を呼ぶので
+   Dynamic の中では行わず、ShowPalette を開いたときと Settings の OK のときだけ
+   plRefreshDeviceLabels[] で $plDevLabels に焼き込む。収録中は $dev / $vidDev
+   (実際に開いているデバイス) を優先して表示する。 *)
+$plDevLabels = <||>;
+
+(* dshow の ID (alt 名 "@device_pnp_..." か表示名) から表示名へ。一覧に無ければ ID のまま *)
+deviceName[id_String, devs_List] := Module[{m},
+  m = SelectFirst[devs, (#["alt"] === id || #["name"] === id) &, None];
+  If[AssociationQ[m], m["name"], id]]
+deviceName[_, _] := None
+
+plRefreshDeviceLabels[] := Module[{aDevs, vDevs, a, v},
+  If[!ffmpegAvailableQ[],
+    Return[$plDevLabels = <|"AudioId" -> None, "VideoId" -> None,
+      "Audio" -> None, "Video" -> None, "Note" -> "ffmpeg なし"|>]];
+  aDevs = ListAudioDevices[]; vDevs = ListVideoDevices[];
+  a = resolveAudioDevice[$cfgDevice]; v = resolveVideoDevice[$cfgVideoDevice];
+  $plDevLabels = <|"AudioId" -> a, "VideoId" -> v,
+    "Audio" -> deviceName[a, aDevs], "Video" -> deviceName[v, vDevs],
+    "AudioAuto" -> ($cfgDevice === Automatic),
+    "VideoAuto" -> ($cfgVideoDevice === Automatic)|>]
+
+(* 1 行分の表示。収録中は実デバイス、停止中は設定から解決した結果。
+   名前解決には $deviceCache だけを使い、ここから ffmpeg は起動しない。 *)
+plDeviceLine[kind : "audio" | "video"] := Module[{running = TrueQ[$running], id, name, auto,
+    label = If[kind === "audio", "マイク: ", "カメラ: "], devs, txt, col, tip},
+  devs = If[AssociationQ[$deviceCache], Lookup[$deviceCache, kind, {}], {}];
+  id = Which[
+    running && kind === "audio", $dev,
+    running && kind === "video", If[$vidDev =!= None, $vidDev, $vidDevSaved],
+    True, Lookup[$plDevLabels, If[kind === "audio", "AudioId", "VideoId"], None]];
+  auto = !running && TrueQ[Lookup[$plDevLabels, If[kind === "audio", "AudioAuto", "VideoAuto"], False]];
+  name = If[StringQ[id], deviceName[id, devs], None];
+  {txt, col} = Which[
+    kind === "video" && TrueQ[$ListenerAudioOnly],
+      {"停止 (音声のみ)", GrayLevel[0.55]},
+    kind === "video" && !StringQ[id] && !auto && !running,
+      {"なし", GrayLevel[0.55]},
+    !StringQ[id],
+      {"未検出", RGBColor[0.75, 0.1, 0.1]},
+    True,
+      {name <> If[auto, If[kind === "audio", " (既定)", " (自動)"], ""], GrayLevel[0.2]}];
+  tip = If[StringQ[id], id, txt];
+  Tooltip[
+    Button[Pane[Style[label <> txt, 8, col, TextAlignment -> Center],
+        ImageSize -> {100, Automatic}, Alignment -> Center],
+      settingsDialog[], Appearance -> "Frameless", Method -> "Queued"],
+    tip]]
+
 settingsDialog[] := Module[{result, aDevs, vDevs, aRules, vRules, note},
   refreshDevices[]; aDevs = ListAudioDevices[]; vDevs = ListVideoDevices[];
   (* 一覧が空のときは理由を出す (旧版は Default/Auto だけが黙って並んでいた) *)
@@ -1541,7 +1599,8 @@ settingsDialog[] := Module[{result, aDevs, vDevs, aRules, vRules, note},
   If[result === $Canceled, Return[]];
   $cfgDevice = result[[1]]; $cfgVideoDevice = result[[2]];
   $cfgCaptureIntv = Quiet@Check[ToExpression[result[[3]]], 15];
-  $cfgSlideThresh = Quiet@Check[ToExpression[result[[4]]], 0.1]]
+  $cfgSlideThresh = Quiet@Check[ToExpression[result[[4]]], 0.1];
+  plRefreshDeviceLabels[];]
 
 (* デバイス設定ダイアログを単体で呼び出す公開 API (パレット非依存)。
    選択を $cfg* に保存し、解決後のデバイス ID を含む現在設定を返す。 *)
@@ -1581,6 +1640,8 @@ ShowPalette[] := Module[{srcNB},
     ClaudeCode`$iPaletteFallback = True;
     If[Head[srcNB] === NotebookObject,
       Quiet[ClaudeCode`iSavePaletteSettings[srcNB]]]];
+  (* マイク/カメラ表示を開く前に 1 回だけ解決 (Dynamic 内で ffmpeg を呼ばない) *)
+  Quiet[plRefreshDeviceLabels[]];
   $palette = CreatePalette[
     DynamicModule[{},
     Dynamic[
@@ -1621,6 +1682,11 @@ ShowPalette[] := Module[{srcNB},
           If[TrueQ[$ListenerAudioOnly], RGBColor[0.45, 0.3, 0.6], GrayLevel[0.2]]],
         ListenerSetAudioOnly[], Appearance -> "Frameless", Method -> "Queued"],
         TrackedSymbols :> {$ListenerAudioOnly}],
+      (* いま効いている入力デバイス (クリックで Settings) *)
+      Dynamic[plDeviceLine["audio"],
+        TrackedSymbols :> {$running, $dev, $plDevLabels}],
+      Dynamic[plDeviceLine["video"],
+        TrackedSymbols :> {$running, $vidDev, $vidDevSaved, $ListenerAudioOnly, $plDevLabels}],
       Dynamic[Button[
         Style[If[effectiveFastMode[], "⚡ 高速", "🔧 標準"],
           9, Bold, If[effectiveFastMode[], RGBColor[0.8, 0.5, 0], GrayLevel[0.3]]],

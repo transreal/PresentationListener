@@ -152,16 +152,17 @@ SystemCredential["OPENAI_API_KEY"] = "sk-xxxxxxxxxxxxxxxxxxxxxxxx"
 ShowPalette[]
 ```
 
-If a palette window appears, the package has loaded correctly.
+If a palette window appears, the package has loaded correctly. The palette's settings section also shows which microphone and camera will be used (see [Palette microphone / camera display](#palette-microphone--camera-display)).
 
 ### Listing devices and settings
 
 ```mathematica
 ListAudioDevices[]
+ListVideoDevices[]
 ShowSettings[]
 ```
 
-`ListAudioDevices[]` lists the DirectShow devices that ffmpeg returns. Use `ShowSettings[]` to choose the microphone and camera, and to switch between recording images + audio and audio only. When the list is empty, the message explains why (ffmpeg not found, or ffmpeg returned no dshow devices).
+`ListAudioDevices[]` and `ListVideoDevices[]` list the DirectShow audio and video devices that ffmpeg returns. Use `ShowSettings[]` to choose the microphone and camera, and to switch between recording images + audio and audio only. When the list is empty, the message explains why (ffmpeg not found, or ffmpeg returned no dshow devices).
 
 ### Minimal operation test
 
@@ -195,6 +196,30 @@ For the other options (`"ChunkDuration"`, `"MinParagraphLength"`, `"CaptureInter
 
 ---
 
+## Palette microphone / camera display
+
+To avoid starting a recording with the wrong input device, the palette's settings section shows the input devices that are currently in effect, as two lines: **マイク:** (microphone) and **カメラ:** (camera).
+
+- **While stopped**, each line shows the device resolved from the `ShowSettings[]` choice (`$cfgDevice` / `$cfgVideoDevice`).
+- **While recording**, each line shows the device that is actually open (the audio device, and the video device).
+- The device ID (DirectShow alternative name such as `@device_pnp_...`, or the display name) is converted to a display name using the device list cache. If the ID is not in the list, the ID itself is shown. The tooltip shows the ID.
+- Clicking a line opens the Settings dialog.
+
+Suffixes and special states:
+
+| Display | Meaning |
+|---------|---------|
+| `<name> (既定)` | The microphone setting is `Automatic`, so the default microphone is used |
+| `<name> (自動)` | The camera setting is `Automatic`, so the camera is chosen automatically |
+| `停止 (音声のみ)` | The camera is not used because `$ListenerAudioOnly` is `True` |
+| `なし` | No camera is set |
+| `未検出` (red) | The device could not be resolved or was not found |
+| `ffmpeg なし` | ffmpeg was not found, so devices cannot be listed |
+
+Resolving devices calls ffmpeg (`-list_devices`) and PowerShell (for the default microphone), so it is not done inside the palette's `Dynamic`. The result is stored in `$plDevLabels` (rebuilt by `plRefreshDeviceLabels[]`) only when `ShowPalette[]` opens the palette and when you press OK in Settings. If you plug in or remove a device while the palette is open, reopen it with `ShowPalette[]` or press OK in Settings to refresh the display.
+
+---
+
 ## Audio-only recording
 
 By default the listener records audio and also captures slide images from a webcam. If you do not need images, or no camera is connected, you can record audio only.
@@ -203,7 +228,7 @@ By default the listener records audio and also captures slide images from a webc
 - **`StartListener["AudioOnly" -> True]`** sets `$ListenerAudioOnly` at start. The video device that was resolved is remembered, so you can switch back to images + audio later in the same session.
 - **`ListenerSetAudioOnly[True | False]`** switches between audio-only and images + audio. It also works while recording; the change takes effect from the next capture. When switching back to images, the slide-difference detection is reset.
 - **`ListenerSetAudioOnly[]`** with no argument toggles the current mode.
-- The palette **Settings** section has a **Recording: images + audio / audio only** toggle that does the same thing.
+- The palette **Settings** section has a **Recording: images + audio / audio only** toggle that does the same thing. While audio only is on, the camera line of the palette shows `停止 (音声のみ)`.
 
 ```mathematica
 ListenerSetAudioOnly[True]    (* audio only *)
@@ -211,7 +236,7 @@ ListenerSetAudioOnly[False]   (* images + audio *)
 ListenerSetAudioOnly[]        (* toggle *)
 ```
 
-If no video device is found, the listener runs audio only. Switching to images + audio then reports that there is no video device. `DiagState[]` shows the video state as `ON`, `OFF 音声のみ` (audio only), or `OFF`.
+If no video device is found, the listener runs audio only. Switching to images + audio then reports that there is no video device. `DiagState[]` shows the video state as `ON`, `OFF 音声のみ` (audio only), or `OFF`. It also prints the configured devices (`cfgDevice` / `cfgVideoDevice`) and the names shown on the palette (`paletteDevices`), which helps when the palette display does not match what you expect.
 
 ---
 
@@ -251,6 +276,8 @@ ListenerSourceVaultSession[]
 | `StartListener` cannot resolve an audio device | Select a microphone in `ShowSettings[]`, or pass `"Device" -> "<device name>"` (see `ListAudioDevices[]`) |
 | The device list is empty | Check that ffmpeg is found and that a microphone is connected and enabled in Windows |
 | Device names appear garbled (for example the Japanese "マイク") | The package repairs ffmpeg's UTF-8 device names automatically. Reload the package if you still see garbled names |
+| The palette's microphone / camera line shows `未検出` or an old device | The display is refreshed only when the palette opens and when Settings is confirmed with OK. Reopen with `ShowPalette[]` or press OK in `ShowSettings[]`. Check `DiagState[]` (`cfgDevice`, `cfgVideoDevice`, `paletteDevices`) |
+| The palette's microphone / camera line shows `ffmpeg なし` | ffmpeg was not found. Install it (see [Installing ffmpeg](#installing-ffmpeg)) and reopen the palette |
 | Only 🔧 standard mode is used, not ⚡ fast mode | Allow the billing API in the palette (`ShowPalette[]`), and check the Anthropic key |
 | The commentary or translation is not in the expected language | Set `"Language"` (language of the talk) and `"OutputLanguage"` (language of the output) explicitly |
 | No slide images are captured | Check whether `$ListenerAudioOnly` is `True` (switch with `ListenerSetAudioOnly[False]` or the palette toggle), and that a camera is selected in `ShowSettings[]` |

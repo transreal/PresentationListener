@@ -35,11 +35,11 @@ ffmpeg の実行ファイルは PATH だけに頼らず、`$FFmpegPath`、PATH�
 
 ### 音声質問 (Voice Q)
 
-`VoiceQuestion[q]` は、質問を発表者の言語へ翻訳 (LLM) し、音声で読み上げ、マイクを開いて発表者の声を書き起こし、回答を原文セルと出力言語への訳セルとしてノートブックに残します。読み上げ以外は音声モデルに話させず、回答が止まるか `VoiceQuestionFinish[]` で確定されます。音声ブリッジには [SourceVault_realtime](https://github.com/transreal/SourceVault_realtime) を使用するため、SourceVault のロードとパレットの「課金API: 許可」が必要です。
+`VoiceQuestion[q]` は、質問を発表者の言語へ翻訳 (LLM) し、音声で読み上げ、マイクを開いて発表者の声を書き起こし、回答を原文セルと出力言語への訳セルとしてノートブックに残します。読み上げ以外は音声モデルに話させず、回答が止まる (無音が `$VoiceQuestionSilence` 秒続く) か `VoiceQuestionFinish[]` で確定されます。音声ブリッジには [SourceVault_realtime](https://github.com/transreal/SourceVault_realtime) を使用するため、SourceVault のロードとパレットの「課金API: 許可」が必要です。
 
 ### SourceVault との統合
 
-[SourceVault](https://github.com/transreal/SourceVault) が読み込まれている場合、各セグメントの書き起こし・解説・質問・回答が自動的にセッションイベントとして ingest されます。セッションは `presentation-<日時>` 形式の ID で管理され (`ListenerSourceVaultSession[]` で取得可能)、後からベクトル検索や要約取得が可能です。ノートブックの保存先も SourceVault の既定ノートブックフォルダに自動解決され、`SourceVaultRegisterNotebook` で参照登録されます。
+[SourceVault](https://github.com/transreal/SourceVault) が読み込まれている場合、各セグメントの書き起こし・解説・質問・回答が自動的にセッションイベントとして ingest されます (`"SourceVaultSync"` オプションで ON/OFF)。セッションは `presentation-<日時>` 形式の ID で管理され (`ListenerSourceVaultSession[]` で取得可能)、後からベクトル検索や要約取得が可能です。ノートブックの保存先も SourceVault の既定ノートブックフォルダに自動解決され、`SourceVaultRegisterNotebook` で参照登録されます。
 
 ### ノートブック保存戦略
 
@@ -169,6 +169,7 @@ ExportSession["lecture_notes"]
 | `$plSVSync` | `True` | SourceVault 同期の有効/無効 |
 | `$ListenerAudioOnly` | `False` | `True` で Web カメラを使わず音声のみ収録 |
 | `$FFmpegPath` | (未設定) | ffmpeg 実行ファイルの明示パス |
+| `$VoiceQuestionSilence` | (パッケージ既定) | 音声質問で回答を確定するまでの無音秒数 |
 | `"Language"` | `Automatic` | 発表言語 (ISO コードまたは言語名。Automatic で Whisper が自動判定) |
 | `"OutputLanguage"` | `Automatic` | 解説・Q&A・タイトルの出力言語 (Automatic で `$Language`) |
 | `"AudioOnly"` | `Automatic` | `True` で音声のみ、`False` で画像+音声 (Automatic は `$ListenerAudioOnly` の現在値) |
@@ -176,6 +177,7 @@ ExportSession["lecture_notes"]
 | `"MinParagraphLength"` | `80` | 解説生成を起動する累積文字数しきい値 |
 | `"CaptureInterval"` | `15` | スライドキャプチャ間隔 (秒) |
 | `"SlideThreshold"` | `0.08` | スライド変化を検出するフレーム間差分しきい値 (0–1) |
+| `"SourceVaultSync"` | `True` | SourceVault への同期記録 |
 | `"AutoCropSlide"` | `False` | スクリーン領域の自動クロップ |
 | `"SlideMaxWidth"` | `1280` | スライド画像の最大幅 (px) |
 | `"NotebookFolder"` | `Automatic` | ノートブック保存先フォルダ |
@@ -220,7 +222,7 @@ ExportSession["lecture_notes"]
 
 #### 状態確認 & パレット
 
-- **`ShowPalette[]`** — コントロールパレットを表示します。Start / Stop / Capture / Question / Voice Q / Process Cells ボタン、収録モード (画像+音声 / 音声のみ)・処理モード・モデル・エフォート・課金 API 許可の切替、Settings、Diagnostics を備えます。Palettes メニューの **Presentation Listener** からも起動できます。
+- **`ShowPalette[]`** — コントロールパレットを表示します。Start / Stop / Capture / Question / Voice Q / Process Cells ボタン、収録モード (画像+音声 / 音声のみ)・処理モード・モデル・エフォート・課金 API 許可の切替、Settings、Diagnostics を備えます。使用中のマイク・カメラも常時表示されます。Palettes メニューの **Presentation Listener** からも起動できます。
 - **`ListenerStatus[]`** — 現在の状態を人間が読める文字列で返します (`"Recording [00:03:42]"` または `"Stopped"`)。
 - **`ListenerRunningQ[]`** — 現在録音中かどうかを `True` / `False` で返します。
 - **`ListenerSourceVaultSession[]`** — 現在の SourceVault セッション ID を返します (同期 OFF・未開始なら `None`)。
