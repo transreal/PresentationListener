@@ -39,6 +39,29 @@
 (*  v23c (2026-10-14): パレット設定欄に「マイク: / カメラ: 」を表示。 *)
 (*    停止中は Settings から解決した入力デバイス、収録中は実際に開いて *)
 (*    いるデバイス。解決は開く時と Settings OK 時だけ (Dynamic 内禁止)。*)
+(*  v24 (2026-10-20): ListenerSummary (パレット「📝 まとめ」)。       *)
+(*    その時点までの発表の 要約 / 鍵になるポイント / 追加情報がないと *)
+(*    理解できない点 (質問案つき) を Template (SourceVault notebook   *)
+(*    template.nb) 由来の別ノートへ書き出す。押すたびに節を足す。     *)
+(*  v24b (2026-10-20): 解説・回答・まとめの本文を Markdown + TeX のまま *)
+(*    Text セルに入れず、ClaudeCode`MarkdownToCells ("TeXMath" ->     *)
+(*    "Typeset", "InlineMarkup" -> True) でセルに組む (plMarkdownCells)。*)
+(*    $…$ は数式、**太字** は太字、- 箇条は Item、### は Subsubsection。 *)
+(*  v24c (2026-10-20): AskQuestion が質問に合うセクション (#n が無ければ *)
+(*    語の重なりで順位付け) のスライド画像を添えて問い合わせ、図の再現・ *)
+(*    計算には自己完結の ```mathematica コードを書かせる → Input セル    *)
+(*    (構文として読めないものには注意を添える)。                          *)
+(*  v24d (2026-10-21): 実発表で AskQuestion の回答が黙って来なかった。   *)
+(*    質問ごとに「⏳ 回答を待っています」+ 見張り ($AskQuestionTimeout)、 *)
+(*    ⚡ では解説と同じく API を直接呼ぶ。状態の初期化は plKeep (値が   *)
+(*    無いときだけ) にし、収録中に Get し直しても状態を消さない。        *)
+(*  v24e (2026-10-21): $onWork / $packageDirectory が値を失ったカーネルで *)
+(*    ノートが保存されなかった。保存先の候補に「前に保存したフォルダ」  *)
+(*    「~/Dropbox/On Work」「書類」を足し、使った先と理由を書く。警告は *)
+(*    1 回の収録で 1 度だけ (保存は次の節でまた試す)。                   *)
+(*  v24e (2026-10-21): curl の API キーを引数に載せない。プロセス一覧の *)
+(*    CommandLine で読めていた。認証ヘッダは一時ファイルに書き -H @ファイル*)
+(*    で渡し、応答を読んだら消す (plCurlAuthArgs / plCurlAuthDone)。      *)
 (* ============================================================ *)
 
 Block[{$CharacterEncoding = "UTF-8"},
@@ -77,8 +100,13 @@ $VoiceQuestionNoAnswerSeconds::usage = "$VoiceQuestionNoAnswerSeconds は何も�
 $VoiceQuestionMaxSeconds::usage = "$VoiceQuestionMaxSeconds は 1 回の回答を聞く上限秒数 (既定 180)。";
 $VoiceQuestionIdleSeconds::usage = "$VoiceQuestionIdleSeconds は最後の質問から自分で開いた音声セッションを閉じるまでの秒数 (既定 120。GPT-Live は接続時間で課金)。";
 $FFmpegPath::usage = "$FFmpegPath は使う ffmpeg.exe のフルパス。Automatic (既定) なら PATH → winget/scoop/choco の既知の場所の順に探す。";
+ListenerSummary::usage = "ListenerSummary[] はその時点までの発表の記録 (発言・解説・音声質問への回答) から、簡潔なまとめ・鍵になるポイント・疑問や質問などの追加情報がないと理解できない点 (質問案つき) を作り、Template (Templates/SourceVault notebook template.nb) 由来の別ノートに書き出す (非ブロック)。1 回の収録につきまとめノートは 1 冊で、呼ぶたびに「経過 mm:ss 時点」の節を末尾に足す。presentation ノートが保存済みなら同じフォルダに …-summary.nb として保存し SourceVault に登録する (\"Save\" -> False で保存しない)。収録を止めた後でも使える。パレットの「📝 まとめ」と同じ。";
+$ListenerSummaryModel::usage = "$ListenerSummaryModel は ⚡高速モード (課金API 許可) でまとめと質問 (AskQuestion) に使う Anthropic のモデル (既定 \"claude-opus-5-5\")。🔧標準モードではパレットのモデル (ClaudeQueryAsync) を使う。";
+$AskQuestionTimeout::usage = "$AskQuestionTimeout は AskQuestion の回答を待つ秒数 (既定 600)。🔧標準でこれを過ぎても届かなければノートに知らせる (遅れて届いた回答も書く)。⚡高速では API 呼び出しの上限時間。";
 
 If[!ValueQ[$FFmpegPath], $FFmpegPath = Automatic];
+If[!ValueQ[$ListenerSummaryModel], $ListenerSummaryModel = "claude-opus-5-5"];
+If[!ValueQ[$AskQuestionTimeout], $AskQuestionTimeout = 600];
 If[!ValueQ[$VoiceQuestionModel], $VoiceQuestionModel = Automatic];
 If[!ValueQ[$ListenerAudioOnly], $ListenerAudioOnly = False];
 If[!ValueQ[$VoiceQuestionSilence], $VoiceQuestionSilence = 5];
@@ -92,8 +120,13 @@ Begin["`Private`"];
 (*  設定参照 & モード管理                                          *)
 (* ============================================================ *)
 
+(* 状態は「まだ値が無いときだけ」初期化する (v24d)。収録中に Get["PresentationListener.wl"] で
+   読み直しても、録音・記録・ノート・パレットの状態を消さずに新しい定義へ差し替えられる *)
+SetAttributes[plKeep, HoldFirst];
+plKeep[s_Symbol, v_] := If[!ValueQ[s], s = v];
+
 billingAllowed[] := TrueQ[ClaudeCode`$iPaletteFallback]
-$plFastMode = True;
+plKeep[$plFastMode, True];
 effectiveFastMode[] := TrueQ[$plFastMode] && billingAllowed[]
 
 (* ============================================================ *)
@@ -104,8 +137,8 @@ effectiveFastMode[] := TrueQ[$plFastMode] && billingAllowed[]
 (*  SourceVault 未ロード or 同期 OFF のときは何もしない (PL 単体動作   *)
 (*  を壊さない)。                                                    *)
 (* ============================================================ *)
-$plSVSession = None;
-$plSVSync = True;
+plKeep[$plSVSession, None];
+plKeep[$plSVSync, True];
 plSVAvailableQ[] := TrueQ[$plSVSync] && StringQ[$plSVSession] &&
   Length[Names["SourceVault`SourceVaultIngestCapturedMedia"]] > 0;
 plSVAppend[kind_String, text_String] := If[plSVAvailableQ[] && StringTrim[text] =!= "",
@@ -124,25 +157,40 @@ ListenerSourceVaultSession[] := $plSVSession;
 (*  状態変数                                                      *)
 (* ============================================================ *)
 
-$recProc = None; $recStartTime = 0; $queuedSet = {};
-$queue = {}; $pProc = None; $pWav = ""; $pOut = ""; $pReq = "";
-$pPara = ""; $prevText = ""; $pRawText = "";
-$pSt = "idle";
+plKeep[$recProc, None]; plKeep[$recStartTime, 0]; plKeep[$queuedSet, {}];
+plKeep[$queue, {}]; plKeep[$pProc, None]; plKeep[$pWav, ""]; plKeep[$pOut, ""]; plKeep[$pReq, ""];
+plKeep[$pAuth, {}];   (* $pProc の curl の認証ヘッダ引数 (plCurlAuthArgs)。応答を読んだら消す *)
+plKeep[$pPara, ""]; plKeep[$prevText, ""]; plKeep[$pRawText, ""];
+plKeep[$pSt, "idle"];
 (* 高速: "idle"→"transcribing"→"correcting"→"commenting"→"idle"
    標準: "idle"→"transcribing"→"llmBusy"→"idle" *)
+(* 🔧標準の見張り (2026-10-20): llmBusy は callback でしか抜けないが、claudecode は
+   見えるノート ($nb) ではジョブを作り、CLI のタイムアウト・空応答・利用上限
+   (Fallback 無し、または Fallback も全滅) では NBAbortJob で赤字を書くだけで callback を
+   呼ばない。そのままだと以後の発言はキューに溜まるだけで解説されない。
+   要求ごとに番号・開始時刻・ジョブ ID を持ち、tickProc が「ジョブが消えたのに
+   callback が来ていない」か「期限 plLLMTimeout[] を過ぎた」で諦めて idle に戻す
+   (書き起こしは残し、解説は省く)。諦めた後・停止後に届いた応答は捨てる。
+   番号は StartListener でも戻さない (前の収録の遅れた応答と取り違えないため)。
+   2026-10-20 追記: claudecode の ClaudeQueryAsync は "CallbackOnFailure" (既定 True) で上の
+   失敗でも callback を "Error: …" で 1 回呼ぶようになった (plErrorReplyQ で受ける)。
+   見張りは残す: Fallback 連鎖が別の呼び出し元に止められる場合などは今も callback が来ない。 *)
+plKeep[$pLLM, <||>]; (* <|"Seq", "Kind" -> "correction"|"commentary", "Since", "Job", "Raw" | "Para", "Slides"|> *)
+plKeep[$pLLMSeq, 0];
+plKeep[$plLLMTimeout, Automatic]; (* 秒。Automatic = $ClaudeTimeout + 60 *)
 
-$vidDev = None; $vidDevSaved = None; $slideCount = 0; $slideBuffer = {}; $pSlides = {};
-$prevFrameImg = None; $lastCapTime = None; $captureIntv = 15; $slideThresh = 0.08;
+plKeep[$vidDev, None]; plKeep[$vidDevSaved, None]; plKeep[$slideCount, 0]; plKeep[$slideBuffer, {}]; plKeep[$pSlides, {}];
+plKeep[$prevFrameImg, None]; plKeep[$lastCapTime, None]; plKeep[$captureIntv, 15]; plKeep[$slideThresh, 0.08];
 (* スライド自動クロップは既定 OFF。ON にすると「室内のスクリーン」を切り出すが、
    左側テキスト等の肝心な部分を切り落とす恐れがあるため、確信できる場合のみ。 *)
-$slideAutoCrop = False; $slideMaxWidth = 1280;
-$task = None; $nb = None; $transcript = ""; $buf = ""; $segs = {};
+plKeep[$slideAutoCrop, False]; plKeep[$slideMaxWidth, 1280];
+plKeep[$task, None]; plKeep[$nb, None]; plKeep[$transcript, ""]; plKeep[$buf, ""]; plKeep[$segs, {}];
 (* SourceVault 用ノート: 保存先フォルダ・保存済みパス・保存済みフラグ *)
-$svNBFolder = Automatic; $nbPath = None; $nbSaved = False;
-$running = False; $start = None; $errs = {}; $tmpDir = None;
-$dev = None; $lang = Automatic; $outLang = Automatic; $chunkSec = 60; $minPara = 80;
-$lastStartMsg = "";
-$tickCount = 0; $lastTickTime = None; $lastSegCount = 0; $lastSegList = {};
+plKeep[$svNBFolder, Automatic]; plKeep[$nbPath, None]; plKeep[$nbSaved, False];
+plKeep[$running, False]; plKeep[$start, None]; plKeep[$errs, {}]; plKeep[$tmpDir, None];
+plKeep[$dev, None]; plKeep[$lang, Automatic]; plKeep[$outLang, Automatic]; plKeep[$chunkSec, 60]; plKeep[$minPara, 80];
+plKeep[$lastStartMsg, ""];
+plKeep[$tickCount, 0]; plKeep[$lastTickTime, None]; plKeep[$lastSegCount, 0]; plKeep[$lastSegList, {}];
 
 (* ============================================================ *)
 (*  APIキー                                                       *)
@@ -194,6 +242,29 @@ plExtractText[json_] := Module[{content, texts},
     StringJoin[Riffle[Select[texts, StringQ], ""]]]]
 
 (* ============================================================ *)
+(*  curl の認証ヘッダ (2026-10-21)                                 *)
+(*  キーを "-H", "x-api-key: …" と引数に載せると、プロセス一覧の   *)
+(*  CommandLine (Win32_Process) で誰でも読める (実際に見えた)。    *)
+(*  ヘッダは一時ファイルに書き、curl の -H @ファイル (7.55+) で渡す。*)
+(*  curl は起動時に読むので、終わって応答を読むところで消す。       *)
+(* ============================================================ *)
+
+(* kind: "openai" (Authorization: Bearer) | "anthropic" (x-api-key)。
+   返り値は curl 引数 {"-H", "@ファイル"} (書けなければ $Failed)。後始末は plCurlAuthDone *)
+plCurlAuthArgs[kind : "openai" | "anthropic", k_String] := Module[{line, dir, f, s},
+  line = If[kind === "openai", "Authorization: Bearer ", "x-api-key: "] <> k;
+  dir = If[StringQ[$tmpDir] && DirectoryQ[$tmpDir], $tmpDir, $TemporaryDirectory];
+  f = FileNameJoin[{dir, "plhdr_" <> StringDelete[CreateUUID[], "-"] <> ".txt"}];
+  s = Quiet@Check[OpenWrite[f, BinaryFormat -> True], $Failed];
+  If[Head[s] =!= OutputStream, Return[$Failed]];
+  BinaryWrite[s, ToCharacterCode[line <> "\n"], "Byte"]; Close[s];
+  {"-H", "@" <> f}]
+plCurlAuthArgs[_, _] := $Failed
+
+plCurlAuthDone[{"-H", a_String}] /; StringStartsQ[a, "@"] := Quiet@DeleteFile[StringDrop[a, 1]]
+plCurlAuthDone[_] := Null
+
+(* ============================================================ *)
 (*  停止・中断                                                     *)
 (* ============================================================ *)
 
@@ -201,6 +272,7 @@ plAbortAll[] := (
   Quiet[ClaudeCode`ClaudeAbort[]];
   If[$pProc =!= None,
     Quiet@Check[If[ProcessStatus[$pProc] === "Running", KillProcess[$pProc]], Null]];
+  plCurlAuthDone[$pAuth]; $pAuth = {};
   $pProc = None; $pSt = "idle")
 
 (* ============================================================ *)
@@ -402,7 +474,7 @@ ffmpegCandidates[] := Module[{la = Environment["LOCALAPPDATA"], up = $HomeDirect
 ffmpegRunsQ[exe_String] := (exe === "ffmpeg" || FileExistsQ[exe]) &&
   IntegerQ[Quiet@Check[RunProcess[{exe, "-hide_banner", "-version"}, "ExitCode"], $Failed]]
 
-$ffmpegExe = None; $ffmpegProbeTime = -Infinity; $ffmpegProbedFor = Automatic;
+plKeep[$ffmpegExe, None]; plKeep[$ffmpegProbeTime, -Infinity]; plKeep[$ffmpegProbedFor, Automatic];
 ffmpegExe[] := Module[{c},
   (* $FFmpegPath を変えたら待たずに探し直す *)
   If[$FFmpegPath =!= $ffmpegProbedFor,
@@ -415,7 +487,7 @@ ffmpegExe[] := Module[{c},
 ffmpegAvailableQ[] := (ffmpegExe[]; StringQ[$ffmpegExe])
 $ffmpegMissingMsg = "ffmpeg が見つかりません。winget install Gyan.FFmpeg で入れるか、PresentationListener`$FFmpegPath に ffmpeg.exe のパスを設定してください。";
 
-$deviceCache = None; $deviceCacheTime = 0;
+plKeep[$deviceCache, None]; plKeep[$deviceCacheTime, 0];
 getDevices[] := (If[$deviceCache === None || (AbsoluteTime[] - $deviceCacheTime) > 30,
     $deviceCache = listDshowDevices[]; $deviceCacheTime = AbsoluteTime[]]; $deviceCache)
 refreshDevices[] := ($deviceCache = None; getDevices[])
@@ -540,16 +612,26 @@ TestVideo[d_String] := Module[{f, ec, img, slide},
    優先: StartListener "NotebookFolder" ($svNBFolder)
         → SourceVault`$SourceVaultDefaultNotebookFolder
         → Global`$onWork → Global`$packageDirectory *)
-plResolveNBFolder[] := Module[{f},
-  f = $svNBFolder;
-  If[StringQ[f] && DirectoryQ[f], Return[f]];
-  f = Quiet @ Symbol["SourceVault`$SourceVaultDefaultNotebookFolder"];
-  If[StringQ[f] && DirectoryQ[f], Return[f]];
-  f = Quiet @ Symbol["Global`$onWork"];
-  If[StringQ[f] && DirectoryQ[f], Return[f]];
-  f = Quiet @ Symbol["Global`$packageDirectory"];
-  If[StringQ[f] && DirectoryQ[f], Return[f]];
-  None]
+(* v24e (2026-10-21): 実発表の途中から $onWork / $packageDirectory がどちらも解決できなくなり、
+   ノートが保存されないまま収録が続いた (「保存先フォルダを解決できませんでした」が節ごとに出た)。
+   その後ろに「前に保存できたフォルダ」「localInit.wl と同じ既定 (~/Dropbox/On Work)」
+   「書類フォルダ」を足し、どれで保存したかを書く。 *)
+plKeep[$plLastNBFolder, None];   (* このカーネルで最後に presentation ノートを保存したフォルダ *)
+plKeep[$plSaveWarned, False];    (* 保存先が無い警告は 1 回の収録で 1 度だけ *)
+plNBFolderCandidates[] := {
+  {"NotebookFolder", $svNBFolder},
+  {"$SourceVaultDefaultNotebookFolder", Quiet @ Symbol["SourceVault`$SourceVaultDefaultNotebookFolder"]},
+  {"$onWork", Quiet @ Symbol["Global`$onWork"]},
+  {"前に保存したフォルダ", $plLastNBFolder},
+  {"~/Dropbox/On Work", FileNameJoin[{$HomeDirectory, "Dropbox", "On Work"}]},
+  {"$packageDirectory", Quiet @ Symbol["Global`$packageDirectory"]},
+  {"$UserDocumentsDirectory", $UserDocumentsDirectory}}
+plResolveNBFolderInfo[] := SelectFirst[plNBFolderCandidates[], StringQ[#[[2]]] && DirectoryQ[#[[2]]] &, None]
+plResolveNBFolder[] := With[{c = plResolveNBFolderInfo[]}, If[ListQ[c], c[[2]], None]]
+(* 本来の候補 ($onWork など) の状態を短く: 「$onWork 未定義, $packageDirectory 未定義」 *)
+plNBFolderDiag[] := StringRiffle[Function[c, c[[1]] <> " " <>
+    Which[!StringQ[c[[2]]], "未定義", DirectoryQ[c[[2]]], "OK", True, "フォルダなし"]] /@
+  Select[plNBFolderCandidates[], MemberQ[{"$onWork", "$packageDirectory"}, #[[1]]] &], ", "]
 
 (* タイトルを Windows でも安全なファイル名要素に整える *)
 plSanitizeName[title_String] := Module[{s},
@@ -578,17 +660,25 @@ plUniquePath[folder_String, fname_String] := Module[{base, ext, path, i},
   path]
 
 (* タイトルが読み取れた時点で 1 度だけ保存し、SourceVault に登録する。 *)
-plSaveNotebook[title_String] := Module[{folder, fname, path},
+plSaveNotebook[title_String] := Module[{info, src, folder, fname, path},
   If[$nbSaved || !nbOK[], Return[$nbSaved]];
-  folder = plResolveNBFolder[];
-  If[!StringQ[folder],
-    wr[Cell["保存先フォルダを解決できませんでした ($onWork / $packageDirectory を確認)",
-      "Text", FontColor -> RGBColor[0.7, 0.3, 0.1], FontSize -> 10]];
+  info = plResolveNBFolderInfo[];
+  If[!ListQ[info],
+    (* 次の節でまた試す。警告は 1 度だけ (節ごとに同じ赤字が並ばないように) *)
+    If[!TrueQ[$plSaveWarned], $plSaveWarned = True;
+      wr[Cell["保存先フォルダが見つからないため、このノートはまだ保存されていません (" <>
+        plNBFolderDiag[] <> ")。ファイル → 保存 で手でも保存できます。",
+        "Text", FontColor -> RGBColor[0.7, 0.3, 0.1], FontSize -> 10]]];
     Return[False]];
+  {src, folder} = info;
   fname = plNBFileName[title];
   path = plUniquePath[folder, fname];
   If[Quiet@Check[NotebookSave[$nb, path]; True, False] =!= True, Return[False]];
-  $nbPath = path; $nbSaved = True;
+  $nbPath = path; $nbSaved = True; $plLastNBFolder = folder;
+  (* 本来の保存先 ($onWork など) が使えなかったときは、どこに保存したかを書く *)
+  If[!MemberQ[{"NotebookFolder", "$SourceVaultDefaultNotebookFolder", "$onWork"}, src],
+    wr[Cell["保存先を " <> src <> " にしました (" <> plNBFolderDiag[] <> ")", "Text",
+      FontColor -> RGBColor[0.7, 0.3, 0.1], FontSize -> 10]]];
   (* SourceVault がこのノートを参照できるよう登録 (best effort) *)
   If[Length[Names["SourceVault`SourceVaultRegisterNotebook"]] > 0,
     Quiet @ Check[SourceVault`SourceVaultRegisterNotebook[path], Null]];
@@ -641,16 +731,22 @@ TestMic[sec_Integer: 5, d_String: ""] := Module[{f, r, a},
   a = Quiet@Import[f, "Audio"];
   If[AudioQ[a], Print["OK MaxAmp=", Max@Abs@AudioData[a]]; f, $Failed]]
 
-TestWhisper[w_String, lang_: "ja"] := Module[{k, o, ec, t},
+TestWhisper[w_String, lang_: "ja"] := Module[{k, o, ec, t, auth},
   k = whisperAPIKey[]; If[k === $Failed, Return[$Failed]];
+  auth = plCurlAuthArgs["openai", k]; If[auth === $Failed, Return[$Failed]];
   o = w <> ".txt";
-  ec = RunProcess[Join[{"curl", "-s", "-o", o, "https://api.openai.com/v1/audio/transcriptions",
-    "-H", "Authorization: Bearer " <> k, "-F", "file=@" <> w,
+  ec = RunProcess[Join[{"curl", "-s", "-o", o, "https://api.openai.com/v1/audio/transcriptions"},
+    auth, {"-F", "file=@" <> w,
     "-F", "model=whisper-1"}, plWhisperLangArgs[lang], {"-F", "response_format=text"}], "ExitCode"];
+  plCurlAuthDone[auth];
   t = If[ec === 0, readUTF8Text[o], $Failed]; Quiet@DeleteFile[o]; t]
 
 DiagState[] := Column[{
-  "running: " <> ToString[$running], "state: " <> $pSt,
+  "running: " <> ToString[$running], "state: " <> $pSt <>
+    If[$pSt === "llmBusy" && KeyExistsQ[$pLLM, "Seq"],
+      "  (" <> $pLLM["Kind"] <> " #" <> ToString[$pLLM["Seq"]] <> ", " <>
+        ToString[Round[AbsoluteTime[] - $pLLM["Since"]]] <> "s / " <> ToString[Round[plLLMTimeout[]]] <>
+        "s, job " <> ToString[$pLLM["Job"]] <> ")", ""],
   "mode: " <> If[effectiveFastMode[], "⚡高速 (curl直接)", "🔧標準 (CLI優先)"],
   "billingAPI: " <> If[billingAllowed[], "許可", "禁止"],
   "tickCount: " <> ToString[$tickCount] <>
@@ -668,6 +764,12 @@ DiagState[] := Column[{
   "paletteDevices: " <> ToString[Lookup[$plDevLabels, "Audio", None]] <>
     " / " <> ToString[Lookup[$plDevLabels, "Video", None]],
   "slides: " <> ToString[Length[$slideBuffer]],
+  "asks: " <> ToString[Count[Values[$plAsks][[All, "State"]], "waiting"]] <> " waiting, " <>
+    ToString[Length[$plApiJobs]] <> " API jobs" <>
+    If[$plAsks === <||>, "", "  (last: " <> Last[Values[$plAsks]]["State"] <> " " <>
+      Last[Values[$plAsks]]["Route"] <> ")"],
+  "summary: " <> $plsSt <> If[StringQ[$plsPath], "  " <> $plsPath, ""] <>
+    If[$plsStatus =!= "", "  (" <> $plsStatus <> ")", ""],
   "buf: " <> ToString[StringLength[$buf]] <> "c",
   "transcript: " <> ToString[StringLength[$transcript]] <> "c",
   "errors: " <> If[Length[$errs] > 0,
@@ -716,23 +818,24 @@ tickProc[] := Switch[$pSt,
     If[Length[$queue] > 0,
       $pWav = First[$queue]; $queue = Rest[$queue];
       If[!FileExistsQ[$pWav] || FileByteCount[$pWav] < 5000, Return[]];
-      Module[{k = whisperAPIKey[], args},
+      Module[{k = whisperAPIKey[], args, auth},
         If[k === $Failed, Return[]];
+        auth = plCurlAuthArgs["openai", k]; If[auth === $Failed, Return[]];
         $pOut = $pWav <> ".txt";
         (* 発表言語が Automatic なら language を付けず Whisper に自動判定させる *)
-        args = Join[{"curl", "-s", "-o", $pOut, "https://api.openai.com/v1/audio/transcriptions",
-          "-H", "Authorization: Bearer " <> k,
-          "-F", "file=@" <> $pWav, "-F", "model=whisper-1"},
+        args = Join[{"curl", "-s", "-o", $pOut, "https://api.openai.com/v1/audio/transcriptions"},
+          auth, {"-F", "file=@" <> $pWav, "-F", "model=whisper-1"},
           plWhisperLangArgs[$lang], {"-F", "response_format=text"}];
         If[StringLength[$prevText] > 0, args = Join[args, {"-F", "prompt=" <> $prevText}]];
         $pProc = Quiet@Check[StartProcess[args], None];
-        If[$pProc =!= None, $pSt = "transcribing"]]],
+        If[$pProc =!= None, $pAuth = auth; $pSt = "transcribing", plCurlAuthDone[auth]]]],
 
   (* === 共通: Whisper 完了 → 分岐 === *)
   "transcribing",
     If[$pProc === None || ProcessStatus[$pProc] =!= "Running",
       Module[{text},
         text = StringTrim[readUTF8Text[$pOut]]; Quiet@DeleteFile[$pOut];
+        plCurlAuthDone[$pAuth]; $pAuth = {};
         If[text === "" || noiseQ[text], $pSt = "idle"; Return[]];
         $pRawText = text;
         If[effectiveFastMode[],
@@ -746,7 +849,7 @@ tickProc[] := Switch[$pSt,
     If[$pProc === None || ProcessStatus[$pProc] =!= "Running",
       Module[{body, corrected},
         body = plReadJSON[$pOut];
-        Quiet@DeleteFile[$pOut]; Quiet@DeleteFile[$pReq];
+        Quiet@DeleteFile[$pOut]; Quiet@DeleteFile[$pReq]; plCurlAuthDone[$pAuth]; $pAuth = {};
         corrected = plExtractText[body];
         If[!StringQ[corrected] || StringLength[StringTrim[corrected]] == 0,
           corrected = $pRawText];
@@ -764,15 +867,15 @@ tickProc[] := Switch[$pSt,
     If[$pProc === None || ProcessStatus[$pProc] =!= "Running",
       Module[{body, commentary},
         body = plReadJSON[$pOut];
-        Quiet@DeleteFile[$pOut]; Quiet@DeleteFile[$pReq];
+        Quiet@DeleteFile[$pOut]; Quiet@DeleteFile[$pReq]; plCurlAuthDone[$pAuth]; $pAuth = {};
         commentary = plExtractText[body];
         If[!StringQ[commentary] || StringLength[StringTrim[commentary]] == 0,
           commentary = "[応答取得失敗]"];
         writeCommentarySection[$pPara, commentary, $pSlides];
         $pSt = "idle"]],
 
-  (* === 🔧標準: ClaudeQueryAsync コールバック待ち === *)
-  "llmBusy", Null,
+  (* === 🔧標準: ClaudeQueryAsync コールバック待ち (来ないときは見張りが戻す) === *)
+  "llmBusy", plLLMWatch[],
 
   _, Null
 ]
@@ -783,7 +886,7 @@ tickProc[] := Switch[$pSt,
 (*  PowerShell/iStartFallbackAsync 不使用 → 起動コスト0           *)
 (* ============================================================ *)
 
-startFastCorrection[text_String] := Module[{k, reqF},
+startFastCorrection[text_String] := Module[{k, reqF, auth},
   k = anthropicAPIKey[];
   If[k === $Failed, (* APIキーなし: 修正スキップ *)
     $prevText = StringTake[text, -Min[StringLength[text], 200]];
@@ -801,19 +904,20 @@ startFastCorrection[text_String] := Module[{k, reqF},
     "max_tokens" -> 2048,
     "messages" -> {
       <|"role" -> "user", "content" -> $correctP <> "\n\n" <> text|>}|>];
-  $pProc = Quiet@Check[StartProcess[{
+  auth = plCurlAuthArgs["anthropic", k];
+  $pProc = If[auth === $Failed, None, Quiet@Check[StartProcess[Join[{
     "curl", "-s", "--max-time", "60",
     "-o", $pOut, "-X", "POST",
     "https://api.anthropic.com/v1/messages",
-    "-H", "Content-Type: application/json; charset=utf-8",
-    "-H", "x-api-key: " <> k,
-    "-H", "anthropic-version: 2023-06-01",
-    "--data-binary", "@" <> reqF}], None];
-  If[$pProc =!= None, $pSt = "correcting", $pSt = "idle"]
+    "-H", "Content-Type: application/json; charset=utf-8"},
+    auth,
+    {"-H", "anthropic-version: 2023-06-01",
+    "--data-binary", "@" <> reqF}]], None]];
+  If[$pProc =!= None, $pAuth = auth; $pSt = "correcting", plCurlAuthDone[auth]; $pSt = "idle"]
 ]
 
 startFastCommentary[para_String] := Module[{k, ctx, prompt, userContent,
-    sysPrompt, imgParts, reqF},
+    sysPrompt, imgParts, reqF, auth},
   k = anthropicAPIKey[];
   If[k === $Failed, $pSt = "idle"; Return[]];
   $pPara = para;
@@ -845,25 +949,100 @@ startFastCommentary[para_String] := Module[{k, ctx, prompt, userContent,
     "max_tokens" -> 4096,
     "system" -> sysPrompt,
     "messages" -> {<|"role" -> "user", "content" -> userContent|>}|>];
-  $pProc = Quiet@Check[StartProcess[{
+  auth = plCurlAuthArgs["anthropic", k];
+  $pProc = If[auth === $Failed, None, Quiet@Check[StartProcess[Join[{
     "curl", "-s", "--max-time", "180",
     "-o", $pOut, "-X", "POST",
     "https://api.anthropic.com/v1/messages",
-    "-H", "Content-Type: application/json; charset=utf-8",
-    "-H", "x-api-key: " <> k,
-    "-H", "anthropic-version: 2023-06-01",
-    "--data-binary", "@" <> reqF}], None];
-  If[$pProc =!= None, $pSt = "commenting", $pSt = "idle"]
+    "-H", "Content-Type: application/json; charset=utf-8"},
+    auth,
+    {"-H", "anthropic-version: 2023-06-01",
+    "--data-binary", "@" <> reqF}]], None]];
+  If[$pProc =!= None, $pAuth = auth; $pSt = "commenting", plCurlAuthDone[auth]; $pSt = "idle"]
 ]
 
 (* ============================================================ *)
 (*  🔧標準パス: ClaudeQueryAsync (CLI優先 + Fallback)             *)
 (* ============================================================ *)
+(* ClaudeQueryAsync は既定 AutoCellize -> True。$nb は見えるノートなので
+   claudecode は jobId を作り、callback が thunk のリストを返さないと応答本文を
+   ジョブのアンカー位置へもう一度セル化する (解説・回答の二重書き、修正済みの
+   書き起こしの迷子セル)。PL の callback は自分で書くので、全呼び出しで止める。 *)
 
-startStandardCorrection[rawText_String] := (
-  $pSt = "llmBusy";
+(* ---- 見張り (状態変数の $pLLM の注記を参照) ---- *)
+
+(* claudecode のジョブは NBAccess のジョブ表にある (公開の照会口が無いので内部表を読む)。
+   読めなければ {} = ジョブでは判定せず期限だけで見張る *)
+plJobIds[] := With[{t = NBAccess`Private`$NBJobTable}, If[AssociationQ[t], Keys[t], {}]]
+(* call (ClaudeQueryAsync) が作ったジョブの ID。0 個・2 個以上 (入れ子で次の要求まで
+   走った等) なら None *)
+SetAttributes[plCallTrackingJob, HoldFirst];
+plCallTrackingJob[call_] := Module[{before = plJobIds[], new},
+  call;
+  new = Complement[plJobIds[], before];
+  If[Length[new] === 1, First[new], None]]
+(* ジョブが終わった。callback はジョブを閉じる前に呼ばれるので、まだ待っている要求の
+   ジョブが消えていれば callback は来ない *)
+plJobGoneQ[jid_String] := !MemberQ[plJobIds[], jid]
+plJobGoneQ[_] := False
+
+plLLMTimeout[] := If[NumericQ[$plLLMTimeout] && $plLLMTimeout > 0, $plLLMTimeout,
+  If[NumericQ[ClaudeCode`$ClaudeTimeout] && ClaudeCode`$ClaudeTimeout > 0,
+    ClaudeCode`$ClaudeTimeout, 1200] + 60]
+
+plLLMBegin[kind_String, extra_Association] := (
+  $pLLMSeq++; $pSt = "llmBusy";
+  $pLLM = Join[<|"Seq" -> $pLLMSeq, "Kind" -> kind, "Since" -> AbsoluteTime[], "Job" -> None|>, extra];
+  $pLLMSeq)
+(* callback がまだ待たれている要求のものか *)
+plLLMLiveQ[id_] := $pSt === "llmBusy" && Lookup[$pLLM, "Seq", None] === id
+plLLMSetJob[id_, jid_] := If[plLLMLiveQ[id] && StringQ[jid], $pLLM["Job"] = jid]
+plLLMLate[id_, what_String] := AppendTo[$errs, <|"time" -> Now,
+  "msg" -> what <> " #" <> ToString[id] <> " の応答は諦めた後に届いたので捨てました"|>]
+
+plLLMWatch[] := Module[{why},
+  If[!KeyExistsQ[$pLLM, "Seq"], $pSt = "idle"; Return[]];
+  why = Which[
+    plJobGoneQ[$pLLM["Job"]], "LLM が応答を返さずに終わりました",
+    AbsoluteTime[] - $pLLM["Since"] > plLLMTimeout[],
+      ToString[Round[plLLMTimeout[]]] <> " 秒以内に応答がありませんでした",
+    True, None];
+  If[StringQ[why], plLLMGiveUp[why]]]
+
+(* 諦める: 修正なら原文を書き起こしとして残す (段落がたまっていれば解説なしの節に)、
+   解説なら発言とスライドだけの節を書く。次の LLM 要求はここでは出さない *)
+plLLMGiveUp[why_String] := Module[{r = $pLLM, raw, slides},
+  $pSt = "idle";   (* 先に戻す: 以後この番号の callback は捨てられる *)
+  AppendTo[$errs, <|"time" -> Now, "msg" -> r["Kind"] <> " #" <> ToString[r["Seq"]] <> ": " <> why|>];
+  Switch[r["Kind"],
+    "correction",
+      raw = r["Raw"];
+      $prevText = StringTake[raw, -Min[StringLength[raw], 200]];
+      $buf = If[$buf === "", raw, $buf <> " " <> raw];
+      $transcript = $transcript <> raw <> "\n";
+      If[StringLength[$buf] >= $minPara,
+        slides = $slideBuffer; $slideBuffer = {};
+        writeUncommentedSection[$buf, slides,
+          "書き起こしの修正: " <> why <> "。原文のまま記録し、この段落の解説は省きます。"];
+        $buf = "",
+        wr[plNoteCell["書き起こしの修正: " <> why <> "。原文のまま記録しました。"]]],
+    "commentary",
+      writeUncommentedSection[r["Para"], r["Slides"],
+        "解説: " <> why <> "。この段落の解説は省きます。"],
+    _, Null]]
+
+(* 応答がエラーか。claudecode は見えるノートで失敗しても callback を "Error: …" で呼ぶ
+   (2026-10-20, ClaudeQueryAsync の "CallbackOnFailure")。Fallback 全滅の経路は以前から
+   エラー文字列を渡していた。解説・回答として書かない (タイトルに拾われると保存名になり、
+   SourceVault にも入る) *)
+plErrorReplyQ[r_] := !StringQ[r] || StringTrim[r] === "" ||
+  StringStartsQ[StringTrim[r], "Error:" | "Error (" | "[API Error" | "[ERROR]"]
+plErrorText[r_] := If[StringQ[r] && StringTrim[r] =!= "", StringTake[StringTrim[r], UpTo[200]], "応答なし"]
+
+startStandardCorrection[rawText_String] := With[{id = plLLMBegin["correction", <|"Raw" -> rawText|>]},
+  plLLMSetJob[id, plCallTrackingJob[
   ClaudeQueryAsync[$correctP <> "\n\n" <> rawText,
-    Function[corrected0, Module[{corrected = corrected0},
+    Function[corrected0, If[!plLLMLiveQ[id], plLLMLate[id, "書き起こしの修正"], Module[{corrected = corrected0},
       If[!StringQ[corrected] || corrected === $Failed ||
          StringStartsQ[ToString[corrected], "Error:"],
         corrected = rawText];
@@ -874,11 +1053,12 @@ startStandardCorrection[rawText_String] := (
       $transcript = $transcript <> corrected <> "\n";
       If[StringLength[$buf] >= $minPara,
         startStandardCommentary[$buf]; $buf = "",
-        $pSt = "idle"]]],
-    $nb, Fallback -> billingAllowed[]])
+        $pSt = "idle"]]]],
+    $nb, Fallback -> billingAllowed[], AutoCellize -> False]]]]
 
 startStandardCommentary[para_String] := Module[{ctx, prompt, sysPrompt, imgs},
   $pPara = para; $pSlides = $slideBuffer; $slideBuffer = {};
+  With[{id = plLLMBegin["commentary", <|"Para" -> para, "Slides" -> $pSlides|>]},
   ctx = If[Length[$segs] > 0,
     "これまでの内容：\n" <> StringRiffle[#["text"]& /@ Take[$segs, UpTo[3]], "\n---\n"] <> "\n\n", ""];
   prompt = ctx <> "以下はプレゼンテーションの最新の書き起こしです：\n\n" <> para <>
@@ -896,22 +1076,80 @@ startStandardCommentary[para_String] := Module[{ctx, prompt, sysPrompt, imgs},
         AppendTo[imgPaths, f]], {im, imgs}];
       augPrompt = sysPrompt <> "\n\n---\n\n" <> prompt <>
         "\n\n【スライド画像ファイル】\n" <> StringRiffle[("- " <> #) & /@ imgPaths, "\n"];
+      plLLMSetJob[id, plCallTrackingJob[
       ClaudeQueryAsync[augPrompt,
-        Function[c0, Module[{c = c0},
-          If[!StringQ[c] || c === $Failed, c = "[応答取得失敗]"];
-          writeCommentarySection[$pPara, c, $pSlides]; $pSt = "idle"]],
-        $nb, Fallback -> False]],
+        Function[c0, Which[
+          !plLLMLiveQ[id], plLLMLate[id, "解説"],
+          plErrorReplyQ[c0], plLLMGiveUp["LLM がエラーを返しました (" <> plErrorText[c0] <> ")"],
+          True, writeCommentarySection[$pPara, c0, $pSlides]; $pSt = "idle"]],
+        $nb, Fallback -> False, AutoCellize -> False]]]],
     (* 画像なしor課金許可: テキストのみ *)
+    plLLMSetJob[id, plCallTrackingJob[
     ClaudeQueryAsync[sysPrompt <> "\n\n---\n\n" <> prompt,
-      Function[c0, Module[{c = c0},
-        If[!StringQ[c] || c === $Failed, c = "[応答取得失敗]"];
-        writeCommentarySection[$pPara, c, $pSlides]; $pSt = "idle"]],
-      $nb, Fallback -> billingAllowed[]]
-  ]]
+      Function[c0, Which[
+        !plLLMLiveQ[id], plLLMLate[id, "解説"],
+        plErrorReplyQ[c0], plLLMGiveUp["LLM がエラーを返しました (" <> plErrorText[c0] <> ")"],
+        True, writeCommentarySection[$pPara, c0, $pSlides]; $pSt = "idle"]],
+      $nb, Fallback -> billingAllowed[], AutoCellize -> False]]]
+  ]]]
 
 (* ============================================================ *)
 (*  解説セクション書き込み (共通)                                    *)
 (* ============================================================ *)
+
+plSlideCell[s_] := Cell[BoxData[ToBoxes[Column[{
+    Style["Slide [" <> s["time"] <> "]", Gray, Italic, 9],
+    Show[s["img"], ImageSize -> 500]}, Spacings -> 0.2]]], "Output",
+  CellMargins -> {{30, 20}, {3, 3}}]
+plSpeechCell[para_String] := Cell[TextData[{
+    StyleBox["Speech: ", FontWeight -> Bold, FontSize -> 10, FontColor -> GrayLevel[0.6]],
+    StyleBox[para, FontSize -> 10, FontColor -> GrayLevel[0.6], FontSlant -> Italic]}], "Text"]
+plNoteCell[note_String] := Cell[ts[] <> " ⚠ " <> note, "Text",
+  FontColor -> RGBColor[0.7, 0.35, 0.], FontSize -> 10, CellMargins -> {{30, 20}, {2, 2}}]
+
+(* ---- LLM の本文 (Markdown + TeX) を Mathematica のセルへ (v24b) ----
+   解説・回答・まとめは LLM が Markdown (太字の **…**、箇条書き、### 見出し) と TeX ($…$) で
+   書いてくる。生のままセルに入れず、canonical な ClaudeCode`MarkdownToCells に文章向けの
+   設定で通す: TeX は式として読まずに書かれたとおり組む ("Typeset": F(x) が F[x] に
+   ならない)、**太字** は太字、`コード` は等幅 ("InlineMarkup")。見出しは節の中の小見出し
+   なので Subsubsection まで。claudecode が古く MarkdownToCells が無ければ Text 1 つ。 *)
+plMarkdownCells[text_String] := Module[{cs},
+  cs = If[Length[DownValues[ClaudeCode`MarkdownToCells]] > 0,
+    Quiet @ Check[ClaudeCode`MarkdownToCells[text, "TeXMath" -> "Typeset", "InlineMarkup" -> True,
+      "HeadingStyles" -> {"Subsubsection", "Subsubsection", "Subsubsection", "Subsubsection"},
+      "TableStyle" -> "Grid", "Images" -> False, "MermaidGraphs" -> False,
+      "BaseDirectory" -> None], $Failed],
+    $Failed];
+  If[ListQ[cs] && cs =!= {} && AllTrue[cs, MatchQ[#, _Cell] &], cs, {Cell[StringTrim[text], "Text"]}]]
+
+(* 1 項目分 (まとめの要点・質問案など) を TextData の部品へ。段落や箇条が混じれば改行でつなぐ *)
+plCellParts[Cell[c_String, ___]] := {c}
+plCellParts[Cell[TextData[l_List], ___]] := l
+plCellParts[Cell[TextData[x_], ___]] := {x}
+plCellParts[_] := {}
+plMarkdownParts[s_String] := Join @@ Riffle[plCellParts /@ plMarkdownCells[s], {{"\n"}}]
+plBoldParts[parts_List] := Replace[parts, {t_String :> StyleBox[t, FontWeight -> "Bold"],
+  b_StyleBox :> StyleBox[b, FontWeight -> "Bold"]}, {1}]
+
+(* 解説・回答の枠 (青い左罫と背景)。Text には余白と字の大きさも付け、Item/Subitem は
+   字下げ (箇条の印) を崩さないよう背景と字の大きさだけ *)
+plFrameCells[cells_List, frameColor_] := Replace[cells, {
+    Cell[c_, "Text", o___] :> Cell[c, "Text", o, Background -> RGBColor[0.95, 0.97, 1.0],
+      CellFrame -> {{2, 0}, {0, 0}}, CellFrameColor -> frameColor,
+      CellMargins -> {{30, 20}, {5, 5}}, FontSize -> 13],
+    Cell[c_, s : ("Item" | "Subitem" | "Subsubitem"), o___] :> Cell[c, s, o,
+      Background -> RGBColor[0.95, 0.97, 1.0], FontSize -> 13]}, {1}]
+
+(* 見張りが LLM を諦めた段落: 発言とスライドだけを節として残す (タイトルが無いので
+   ノートの保存名には使わない)。記録 ($segs) にも入れ、質問・まとめから見えるようにする *)
+writeUncommentedSection[para_String, slides_List, note_String] := Module[{cells},
+  AppendTo[$segs, <|"text" -> para, "commentary" -> "(解説なし)", "translation" -> "",
+    "time" -> elapsed[], "timestamp" -> Now, "slides" -> (#["img"]& /@ slides)|>];
+  cells = Join[{Cell[ToString[Length[$segs]] <> "  (解説なし)  [" <> elapsed[] <> "]", "Subsection"]},
+    plSlideCell /@ slides, {plSpeechCell[para], plNoteCell[note]}];
+  wr[Cell[CellGroupData[cells, Open]]];
+  plPersistNotebook[];
+  plSVAppend["ASRTranscript", para]]
 
 writeCommentarySection[para_String, commentary0_String, slides_List] :=
 Module[{n, title, bodyText, cells, commentary, translation},
@@ -926,20 +1164,13 @@ Module[{n, title, bodyText, cells, commentary, translation},
   If[!$nbSaved && StringQ[title] && title =!= "---" && StringLength[title] >= 2,
     plSaveNotebook[title]];
   cells = {Cell[ToString[n] <> "  " <> title <> "  [" <> elapsed[] <> "]", "Subsection"]};
-  Do[AppendTo[cells, Cell[BoxData[ToBoxes[Column[{
-    Style["Slide [" <> s["time"] <> "]", Gray, Italic, 9],
-    Show[s["img"], ImageSize -> 500]}, Spacings -> 0.2]]], "Output",
-    CellMargins -> {{30, 20}, {3, 3}}]], {s, slides}];
-  AppendTo[cells, Cell[TextData[{
-    StyleBox["Speech: ", FontWeight -> Bold, FontSize -> 10, FontColor -> GrayLevel[0.6]],
-    StyleBox[para, FontSize -> 10, FontColor -> GrayLevel[0.6], FontSlant -> Italic]}], "Text"]];
+  Do[AppendTo[cells, plSlideCell[s]], {s, slides}];
+  AppendTo[cells, plSpeechCell[para]];
   If[StringLength[translation] > 0,
     AppendTo[cells, Cell[TextData[{
       StyleBox["Translation: ", FontWeight -> Bold, FontSize -> 10, FontColor -> GrayLevel[0.4]],
       StyleBox[translation, FontSize -> 11, FontColor -> GrayLevel[0.3]]}], "Text"]]];
-  AppendTo[cells, Cell[bodyText, "Text", Background -> RGBColor[0.95, 0.97, 1.0],
-    CellFrame -> {{2, 0}, {0, 0}}, CellFrameColor -> RGBColor[0.2, 0.4, 0.8],
-    CellMargins -> {{30, 20}, {5, 5}}, FontSize -> 13]];
+  cells = Join[cells, plFrameCells[plMarkdownCells[bodyText], RGBColor[0.2, 0.4, 0.8]]];
   wr[Cell[CellGroupData[cells, Open]]];
   plPersistNotebook[];   (* 画像を含む最新状態を保存済みノートファイルへ反映 *)
   (* SourceVault 融合: 発言(transcript)と解説を session event として ingest *)
@@ -1000,7 +1231,9 @@ StartListener[OptionsPattern[]] := Module[{d, vd, k},
     Return[startFail["一時ディレクトリの作成に失敗しました。"]]];
   $transcript = ""; $buf = ""; $segs = {}; $queue = {}; $prevText = ""; $queuedSet = {};
   $slideBuffer = {}; $prevFrameImg = None; $lastCapTime = None; $slideCount = 0;
-  $nbPath = None; $nbSaved = False;
+  $nbPath = None; $nbSaved = False; $plSaveWarned = False;
+  (* まとめ (v24): 新しい発表は新しいまとめノートへ。前の発表の解説中段落も持ち越さない *)
+  $pPara = ""; $plQALog = {}; $plsNB = None; $plsPath = None; $plsHeaderDone = False;
   $running = True; $start = Now; $errs = {}; $lastStartMsg = "";
   (* SourceVault 融合: 同期 ON かつ SourceVault ロード済みならセッションを開始 *)
   $plSVSync = TrueQ[OptionValue["SourceVaultSync"]];
@@ -1009,6 +1242,7 @@ StartListener[OptionsPattern[]] := Module[{d, vd, k},
     None];
   $tickCount = 0; $lastTickTime = None; $lastSegCount = 0; $lastSegList = {};
   $pSt = "idle"; $pProc = None; $recProc = None; $pSlides = {};
+  plCurlAuthDone[$pAuth]; $pAuth = {};
   makeNB[];
   wr[Cell[ts[] <> " - Started v22 (" <>
     If[effectiveFastMode[], "⚡curl直接", "🔧CLI優先"] <> ", lang=" <>
@@ -1072,7 +1306,141 @@ buildSectionText[seg_Association, idx_Integer] := StringJoin[
   "【解説】\n", seg["commentary"], "\n"]
 sectionImages[seg_Association] := Lookup[seg, "slides", {}]
 
-AskQuestion[q_String] := Module[{refs, allText, imgList, focusSegs, prompt},
+(* ---- 質問に合うセクションを選ぶ (v24c) ----
+   「#3」のような番号が無いとき、質問の語と各セクションの発言・解説・訳の重なりで順位を付ける。
+   語 = 3 文字以上の英数字の語と、ひらがなを含まない 2 文字 (漢字・カタカナ・数字。「格子」
+   「充填」「ク2」…)。どのセクションにも出る語ほど軽く数える (IDF)。上位のスライドを質問に
+   添えるため (図の再現などはスライドを見ないと答えられない)。 *)
+plQueryTokens[s_String] := DeleteDuplicates @ Join[
+  ToLowerCase /@ StringCases[s, RegularExpression["[A-Za-z][A-Za-z0-9_]{2,}"]],
+  Select[StringJoin /@ Partition[Characters[s], 2, 1],
+    StringMatchQ[#, RegularExpression["[\\x{30A0}-\\x{30FF}\\x{4E00}-\\x{9FFF}0-9]{2}"]] &&
+      !StringMatchQ[#, RegularExpression["[0-9]{2}"]] &]]
+
+plRankSections[q_String, segs_List] := Module[{qt = plQueryTokens[q], docs, n = Length[segs], df, sc},
+  If[qt === {} || n == 0, Return[{}]];
+  docs = plQueryTokens[StringRiffle[{Lookup[#, "text", ""], Lookup[#, "commentary", ""],
+    Lookup[#, "translation", ""]}, " "]] & /@ segs;
+  df = AssociationMap[Function[t, Count[docs, d_ /; MemberQ[d, t]]], qt];
+  sc = Table[Total[Function[t, If[MemberQ[docs[[i]], t], Log[(n + 1.)/(df[t] + 0.5)], 0.]] /@ qt], {i, n}];
+  Select[Ordering[sc, All, Greater], sc[[#]] > 0 &]]
+
+(* 回答の書式。図の再現・計算の質問には、そのまま評価できる Mathematica のコードを
+   ```mathematica で書かせる (ノートでは Input セルになり、Shift+Enter で動く) *)
+$plAnswerFormat = "【書式】\n\
+- 数式は TeX で $…$ (独立した式は $$…$$) と書く。強調は **…**、箇条は - でよい (ノートでは数式・太字・箇条に組まれる)。\n\
+- 計算・プロット・図の再現・数値例・検証を求められたら、Wolfram Language (Mathematica) で実行できるコードを \
+```mathematica と ``` で囲んで示す。コードは自己完結にし (必要な定義・パラメータをすべて含め、そのまま評価すれば\
+結果や図が出る)、スライドの図に合わせる (軸の範囲・ラベル・凡例・描く曲線や点)。スライドや発言から読み取れない値を\
+仮定したときは、コード中のコメント (* … *) と本文の両方で仮定だと書く。\n\
+- コードの前に何を計算・描画するのかを、後に結果の読み方を短く書く。";
+
+(* 回答の Input セルのうち構文として読めないものには注意を添える (評価前に気づけるように) *)
+plCheckCodeCells[cells_List] := Join @@ Map[Function[c,
+    If[MatchQ[c, Cell[_String, "Input", ___]] && !SyntaxQ[First[c]],
+      {c, plNoteCell["このコードは構文として読めません。評価する前に確認してください。"]}, {c}]],
+  cells]
+
+(* ---- 質問の待ち表示と見張り (v24d, 2026-10-21) ----
+   実発表で「Q: …」だけ出て回答が来なかった。読み込み済みの古い claudecode は失敗時に
+   callback を呼ばないため、どこで落ちても何も出ない。質問ごとに「⏳ 回答を待っています」を
+   出し、$AskQuestionTimeout 秒届かなければその場で知らせる (遅れて届いた回答も書く)。
+   ⚡ (課金API 許可 + 高速) は解説と同じく API を直接呼ぶ (claudecode のジョブを通らない)。 *)
+plKeep[$plAsks, <||>];          (* id -> <|"Q", "T0", "Tag", "Route", "State" (waiting|timedout|done)|> *)
+plKeep[$plApiJobs, {}];         (* ⚡ の curl: <|"Process", "Request", "Out", "Auth", "Callback", "T0", "Timeout"|> *)
+plKeep[$plAskTask, None];
+
+(* 画像つきの ClaudeQueryAsync ({本文, Image…}) を持つ claudecode か (2026-10-20 以降) *)
+plClaudeListPromptQ[] := AnyTrue[DownValues[ClaudeCode`ClaudeQueryAsync][[All, 1]],
+  !FreeQ[#, Verbatim[Pattern][_, Verbatim[Blank][List]]] &]
+
+plImageContent[img_Image] := <|"type" -> "image", "source" -> <|"type" -> "base64",
+  "media_type" -> "image/jpeg", "data" -> BaseEncode[ExportByteArray[
+    If[ImageDimensions[img][[1]] > 1568, ImageResize[img, 1568], img], "JPEG"]]|>|>
+
+(* ⚡ の問い合わせ 1 本: 本文 (content のリスト) を Messages API へ。終われば plAskTick が
+   cb[本文 | "Error: …" | Failure] を呼ぶ。新しいモデルには effort と server-side fallback *)
+plApiAsync[content_List, cb_, tmo_] := Module[{k = anthropicAPIKey[], m = plsModel[], dir, id, req, out,
+    body, hdr = {}, proc, auth},
+  If[!StringQ[k], Return[$Failed]];
+  dir = If[StringQ[$tmpDir] && DirectoryQ[$tmpDir], $tmpDir, $TemporaryDirectory];
+  id = StringDelete[CreateUUID[], "-"];
+  req = FileNameJoin[{dir, "ask_req_" <> id <> ".json"}];
+  out = FileNameJoin[{dir, "ask_resp_" <> id <> ".json"}];
+  body = <|"model" -> m, "max_tokens" -> 16000,
+    "messages" -> {<|"role" -> "user", "content" -> content|>}|>;
+  If[plsModernQ[m],
+    body["output_config"] = <|"effort" -> "medium"|>; body["fallbacks"] = "default";
+    hdr = {"-H", "anthropic-beta: server-side-fallback-2026-07-01"}];
+  If[plWriteJSON[req, body] === $Failed, Return[$Failed]];
+  auth = plCurlAuthArgs["anthropic", k];
+  If[auth === $Failed, Quiet@DeleteFile[req]; Return[$Failed]];
+  proc = Quiet@Check[StartProcess[Join[{"curl", "-s", "--max-time", ToString[Round[tmo]], "-o", out,
+    "-X", "POST", "https://api.anthropic.com/v1/messages",
+    "-H", "Content-Type: application/json; charset=utf-8"}, auth,
+    {"-H", "anthropic-version: 2023-06-01"}, hdr, {"--data-binary", "@" <> req}]], None];
+  If[Head[proc] =!= ProcessObject, Quiet@DeleteFile[req]; plCurlAuthDone[auth]; Return[$Failed]];
+  AppendTo[$plApiJobs, <|"Process" -> proc, "Request" -> req, "Out" -> out, "Auth" -> auth, "Callback" -> cb,
+    "T0" -> AbsoluteTime[], "Timeout" -> tmo|>];
+  plAskEnsureTask[]; True]
+
+plAskEnsureTask[] := If[$plAskTask === None, $plAskTask = RunScheduledTask[plAskTick[], 2]]
+
+plAskBegin[q_String, route_String] := Module[{id = StringDelete[CreateUUID[], "-"], tag},
+  tag = "pl-ask-" <> id;
+  $plAsks[id] = <|"Q" -> q, "T0" -> AbsoluteTime[], "Tag" -> tag, "Route" -> route, "State" -> "waiting"|>;
+  wr[Cell["⏳ 回答を待っています… (" <> route <> ")", "Text", FontColor -> GrayLevel[0.5],
+    FontSize -> 10, CellMargins -> {{30, 20}, {2, 2}}, CellTags -> {tag}]];
+  plAskEnsureTask[]; id]
+
+plAskDeliver[id_String, ans_] := Module[{a = Lookup[$plAsks, id, None], late},
+  If[!AssociationQ[a] || a["State"] === "done", Return[Null]];
+  late = a["State"] === "timedout";
+  $plAsks[id] = Append[a, "State" -> "done"];
+  If[nbOK[], Quiet@NBAccess`NBDeleteCellsByTag[$nb, a["Tag"]]];
+  If[plErrorReplyQ[ans],
+    (* エラーは回答として書かず、SourceVault にも入れない *)
+    AppendTo[$errs, <|"time" -> Now, "msg" -> "AskQuestion: " <> plErrorText[plReplyText[ans]]|>];
+    wr[plNoteCell["回答を取得できませんでした (" <> plErrorText[plReplyText[ans]] <> ")"]],
+    If[late, wr[plNoteCell["遅れて届いた回答です (質問: " <> StringTake[a["Q"], UpTo[40]] <> ")"]]];
+    Scan[wr, plCheckCodeCells[plFrameCells[plMarkdownCells[ans], RGBColor[0.3, 0.5, 0.9]]]];
+    plSVAppend["ResponseDraft", ans]]]   (* SourceVault 融合: 回答を記録 *)
+
+(* Failure や Association の応答も理由が読めるように *)
+plReplyText[r_String] := r
+plReplyText[f_?FailureQ] := Replace[Quiet[f["Message"]], Except[_String] -> "Failure"]
+plReplyText[_] := ""
+
+plAskTick[] := Quiet@Check[Module[{now = AbsoluteTime[], done},
+  (* ⚡ の curl が終わったものを読む (タイムアウト・通信失敗は空の応答 → エラー) *)
+  done = Select[$plApiJobs, ProcessStatus[#["Process"]] =!= "Running" &];
+  If[done =!= {},
+    $plApiJobs = Complement[$plApiJobs, done];
+    Scan[Function[j, Module[{json = plReadJSON[j["Out"]], r},
+        Quiet@DeleteFile[{j["Out"], j["Request"]}]; plCurlAuthDone[Lookup[j, "Auth", {}]];
+        r = Which[
+          !AssociationQ[json], "Error: API から応答がありませんでした (" <>
+            ToString[Round[now - j["T0"]]] <> " 秒、タイムアウトか通信エラー)",
+          Lookup[json, "stop_reason", ""] === "refusal", "Error: モデルがこの質問への回答を断りました",
+          True, Replace[plExtractText[json], Except[_String] -> "Error: 応答を読めませんでした"]];
+        j["Callback"][r]]], done]];
+  (* 🔧 で届かないまま $AskQuestionTimeout 秒たった質問は、その場で知らせる
+     (⚡ は curl の --max-time で必ず終わり、上でエラーとして届く) *)
+  KeyValueMap[Function[{id, a},
+      If[a["State"] === "waiting" && !StringStartsQ[a["Route"], "⚡"] &&
+          now - a["T0"] > $AskQuestionTimeout,
+        $plAsks[id] = Append[a, "State" -> "timedout"];
+        If[nbOK[], Quiet@NBAccess`NBDeleteCellsByTag[$nb, a["Tag"]]];
+        AppendTo[$errs, <|"time" -> Now, "msg" -> "AskQuestion: no reply in " <>
+          ToString[Round[$AskQuestionTimeout]] <> " s (" <> a["Route"] <> ")"|>];
+        wr[plNoteCell["回答が " <> ToString[Round[$AskQuestionTimeout]] <> " 秒たっても届きません (" <>
+          a["Route"] <> ")。もう一度質問してください (パレットで ⚡ 高速 にすると API を直接使います)。" <>
+          "遅れて届けば続けて書きます。"]]]],
+    $plAsks];
+  If[$plApiJobs === {} && !MemberQ[Values[$plAsks][[All, "State"]], "waiting"],
+    Quiet@RemoveScheduledTask[$plAskTask]; $plAskTask = None]], Null]
+
+AskQuestion[q_String] := Module[{refs, allText, imgList, focusSegs, prompt, rank, slideNote = "", fast, id},
   If[!nbOK[], Return["No notebook."]]; refs = parseSecRef[q]; imgList = {};
   If[Length[$segs] == 0,
     allText = If[StringLength[$transcript] > 0, $transcript, "(内容なし)"],
@@ -1084,22 +1452,34 @@ AskQuestion[q_String] := Module[{refs, allText, imgList, focusSegs, prompt},
       allText = allText <> StringRiffle[buildSectionText[$segs[[#]], #] & /@ focusSegs, "\n"];
       imgList = Join @@ (sectionImages[$segs[[#]]] & /@ focusSegs),
       allText = StringRiffle[MapIndexed[buildSectionText[#1, #2[[1]]] &, $segs], "\n"];
-      imgList = If[Length[$segs] > 0, sectionImages[Last[$segs]], {}]]];
+      (* 番号が無ければ質問に合うセクション (上位 2 つ) のスライド。どれも合わなければ最後の節 *)
+      rank = Select[plRankSections[q, $segs], sectionImages[$segs[[#]]] =!= {} &];
+      focusSegs = If[rank =!= {}, Take[rank, UpTo[2]], {Length[$segs]}];
+      imgList = Join @@ (sectionImages[$segs[[#]]] & /@ focusSegs)]];
+  imgList = Take[Select[imgList, ImageQ], UpTo[4]];
+  fast = effectiveFastMode[] && StringQ[anthropicAPIKey[]];
+  (* 🔧 で claudecode が古い (画像つきの ClaudeQueryAsync が無い) ときは画像を外す。
+     渡すと、どの定義にも当たらず黙って何も起きない *)
+  If[!fast && !plClaudeListPromptQ[], imgList = {}];
+  If[imgList =!= {},
+    slideNote = "\n\n（セクション " <> StringRiffle[("#" <> ToString[#]) & /@ focusSegs, ", "] <>
+      " のスライド画像 " <> ToString[Length[imgList]] <> " 枚を添付。図の軸・曲線・数値はここから読み取る）"];
   prompt = "プレゼンテーション記録を活用し、質問に正確かつ深く回答してください。" <>
-    "回答は " <> plLangName[plOutLang[]] <> " で書いてください（記録が別の言語でも）。\n\n---\n\n" <>
-    allText <> If[Length[imgList] > 0, "\n\n（" <> ToString[Length[imgList]] <> "枚のスライド添付）", ""] <>
-    "\n\n質問：\n" <> q;
+    "回答は " <> plLangName[plOutLang[]] <> " で書いてください（記録が別の言語でも）。\n" <>
+    $plAnswerFormat <> "\n\n---\n\n" <> allText <> slideNote <> "\n\n質問：\n" <> q;
   wr[Cell["Q: " <> q, "Text", FontWeight -> "Bold", FontSize -> 14, CellMargins -> {{30, 20}, {8, 4}}]];
   plSVAppend["UserQuestion", q];   (* SourceVault 融合: 質問を記録 *)
-  (* Q&A は常に ClaudeQueryAsync (深い回答のためCLI優先) *)
-  ClaudeQueryAsync[prompt,
-    Function[ans0, Module[{ans = ans0},
-      If[!StringQ[ans] || ans === $Failed, ans = "[応答取得失敗]"];
-      wr[Cell[ans, "Text", Background -> RGBColor[0.95, 0.97, 1.0],
-        CellFrame -> {{2, 0}, {0, 0}}, CellFrameColor -> RGBColor[0.3, 0.5, 0.9],
-        CellMargins -> {{30, 20}, {5, 5}}, FontSize -> 13]];
-      plSVAppend["ResponseDraft", ans]]],   (* SourceVault 融合: 回答を記録 *)
-    $nb, Fallback -> billingAllowed[]];
+  id = plAskBegin[q, If[fast, "⚡ " <> plsModel[], "🔧 ClaudeQueryAsync"]];
+  If[fast,
+    (* ⚡: 解説と同じく API を直接 (claudecode のジョブを通らない)。画像は base64 *)
+    If[plApiAsync[Join[{<|"type" -> "text", "text" -> prompt|>}, plImageContent /@ imgList],
+        With[{i = id}, Function[r, plAskDeliver[i, r]]], $AskQuestionTimeout] =!= True,
+      plAskDeliver[id, "Error: API への問い合わせを起動できませんでした (curl)"]],
+    (* 🔧: ClaudeQueryAsync (CLI 優先)。スライドがあれば画像つき ({本文, Image…}) *)
+    With[{i = id},
+      ClaudeQueryAsync[If[imgList === {}, prompt, Join[{prompt}, imgList]],
+        Function[ans0, plAskDeliver[i, ans0]],
+        $nb, Fallback -> billingAllowed[], AutoCellize -> False]]];
   "質問を送信しました。"]
 
 AskQuestion[q_] := AskQuestion[ToString[q]]
@@ -1118,10 +1498,11 @@ AskQuestion[q_] := AskQuestion[ToString[q]]
 (*  話し出したら止める。                                             *)
 (* ============================================================ *)
 
-$vqSt = "idle"; $vqStatus = ""; $vqTask = None; $vqOwnSession = False;
-$vqQ = ""; $vqSpoken = None; $vqSpeakerLang = None; $vqId = "";
-$vqT0 = 0; $vqParts = <||>; $vqSeq0 = 0; $vqLastUser = ""; $vqChangeT = 0;
-$vqCancelT = 0; $vqFinish = False; $vqIdleSince = 0; $vqPrevMuted = None; $vqJobs = {};
+plKeep[$vqSt, "idle"]; plKeep[$vqStatus, ""]; plKeep[$vqTask, None]; plKeep[$vqOwnSession, False];
+plKeep[$vqQ, ""]; plKeep[$vqSpoken, None]; plKeep[$vqSpeakerLang, None]; plKeep[$vqId, ""];
+plKeep[$vqT0, 0]; plKeep[$vqParts, <||>]; plKeep[$vqSeq0, 0]; plKeep[$vqLastUser, ""]; plKeep[$vqChangeT, 0];
+plKeep[$vqCancelT, 0]; plKeep[$vqFinish, False]; plKeep[$vqIdleSince, 0]; plKeep[$vqPrevMuted, None]; plKeep[$vqJobs, {}];
+plKeep[$vqLLMJob, None]; plKeep[$vqAns, ""]; (* 待っている訳の claudecode ジョブ / 訳している回答の原文 *)
 
 vqRealtimeQ[] := Length[DownValues[SourceVault`SourceVaultRealtimeStart]] > 0
 
@@ -1170,9 +1551,11 @@ vqOK[r_] := StringQ[r] && !StringStartsQ[r, "Error:"] && !StringStartsQ[r, "[API
   StringTrim[r] =!= ""
 
 (* 翻訳は短いので ⚡高速モードでは解説と同じ curl 直叩き (vqTick が待つ)。
-   🔧標準モードは ClaudeQueryAsync。どちらも cb[訳 | $Failed] を呼ぶ。 *)
+   🔧標準モードは ClaudeQueryAsync。どちらも cb[訳 | $Failed] を呼ぶ。
+   ただし 🔧標準は claudecode が失敗時に callback を呼ばないことがある (見張りの注記参照)
+   ので、そのジョブ ID を返す (curl・取れないときは None)。vqStep が見張る。 *)
 vqLLM[prompt_String, cb_] := Module[{k = If[effectiveFastMode[], anthropicAPIKey[], $Failed],
-    dir, id, req, out, proc},
+    dir, id, req, out, proc, auth},
   If[k =!= $Failed,
     dir = If[StringQ[$tmpDir] && DirectoryQ[$tmpDir], $tmpDir, $TemporaryDirectory];
     id = StringReplace[CreateUUID[], "-" -> ""];
@@ -1180,23 +1563,27 @@ vqLLM[prompt_String, cb_] := Module[{k = If[effectiveFastMode[], anthropicAPIKey
     out = FileNameJoin[{dir, "vq_resp_" <> id <> ".json"}];
     plWriteJSON[req, <|"model" -> "claude-sonnet-4-6", "max_tokens" -> 2048,
       "messages" -> {<|"role" -> "user", "content" -> prompt|>}|>];
-    proc = Quiet@Check[StartProcess[{"curl", "-s", "--max-time", "60", "-o", out, "-X", "POST",
-      "https://api.anthropic.com/v1/messages",
-      "-H", "Content-Type: application/json; charset=utf-8", "-H", "x-api-key: " <> k,
-      "-H", "anthropic-version: 2023-06-01", "--data-binary", "@" <> req}], None];
+    auth = plCurlAuthArgs["anthropic", k];
+    proc = If[auth === $Failed, None,
+      Quiet@Check[StartProcess[Join[{"curl", "-s", "--max-time", "60", "-o", out, "-X", "POST",
+        "https://api.anthropic.com/v1/messages",
+        "-H", "Content-Type: application/json; charset=utf-8"}, auth,
+        {"-H", "anthropic-version: 2023-06-01", "--data-binary", "@" <> req}]], None]];
     If[Head[proc] === ProcessObject,
-      AppendTo[$vqJobs, <|"Process" -> proc, "Request" -> req, "Out" -> out, "Callback" -> cb|>];
-      vqEnsureTask[]; Return[Null]]];
-  ClaudeQueryAsync[prompt,
+      AppendTo[$vqJobs, <|"Process" -> proc, "Request" -> req, "Out" -> out, "Auth" -> auth,
+        "Callback" -> cb|>];
+      vqEnsureTask[]; Return[None]];
+    plCurlAuthDone[auth]];
+  plCallTrackingJob[ClaudeQueryAsync[prompt,
     Function[r, cb[If[vqOK[r], vqClean[r], $Failed]]],
-    $nb, Fallback -> billingAllowed[]]]
+    $nb, Fallback -> billingAllowed[], AutoCellize -> False]]]
 
 vqPollJobs[] := Module[{done},
   done = Select[$vqJobs, ProcessStatus[#["Process"]] =!= "Running" &];
   If[done === {}, Return[]];
   $vqJobs = Complement[$vqJobs, done];
   Scan[Function[j, Module[{r = plExtractText[plReadJSON[j["Out"]]]},
-      Quiet@DeleteFile[{j["Out"], j["Request"]}];
+      Quiet@DeleteFile[{j["Out"], j["Request"]}]; plCurlAuthDone[Lookup[j, "Auth", {}]];
       j["Callback"][If[vqOK[r], vqClean[r], $Failed]]]], done]]
 
 (* 質問を発表者の言語へ。1 行目 LANG: <英語の言語名>、2 行目以降が質問文 *)
@@ -1211,7 +1598,7 @@ vqTranslateQuestion[q_String] := Module[{sample = vqSpeakerSample[], explicit, q
     (* 発表者の言語の手がかりが無い: 質問をそのまま読む *)
     $vqSpeakerLang = None; $vqSpoken = q; Return[]];
   vqSay["質問を訳しています…"];
-  vqLLM[
+  $vqLLMJob = With[{id = $vqId}, vqLLM[
     "You relay an audience question to a presenter by voice. Rewrite the question in the " <>
     "presenter's language as natural, polite spoken language (keep technical terms accurate; " <>
     "if it is already in that language, keep it as is).\n" <>
@@ -1221,13 +1608,15 @@ vqTranslateQuestion[q_String] := Module[{sample = vqSpeakerSample[], explicit, q
     "Output exactly two parts: first line `LANG: <language name in English>`, then the question text only " <>
     "(no quotes, no notes).\n\nQuestion:\n" <> q,
     Function[r, Module[{lines, lang, text},
+      (* 前の質問の訳が遅れて届いた: 今の質問の読み上げ文を変えない *)
+      If[$vqId =!= id, Return[]];
       If[!StringQ[r], $vqSpoken = q; Return[]];
       lines = StringSplit[r, "\n"];
       lang = SelectFirst[lines, StringStartsQ[StringTrim[#], "LANG:", IgnoreCase -> True] &, None];
       text = StringTrim[StringRiffle[DeleteCases[lines, lang], "\n"]];
       $vqSpeakerLang = If[StringQ[lang],
         StringTrim[StringDrop[StringTrim[lang], 5]], None];
-      $vqSpoken = If[text === "", q, text]]]]]
+      $vqSpoken = If[text === "", q, text]]]]]]
 
 vqFail[msg_String] := (
   vqDone[];
@@ -1267,7 +1656,7 @@ VoiceQuestion[q_String] := Module[{ok},
   If[StringTrim[q] === "", Return["質問が空です。"]];
   If[$vqSt =!= "idle", Return["前の音声質問がまだ終わっていません (VoiceQuestionFinish[] で回答を確定)。"]];
   If[!nbOK[], makeNB[]];   (* 聞き取り前でも書き出し先を用意する *)
-  $vqQ = StringTrim[q]; $vqSpoken = None; $vqSpeakerLang = None;
+  $vqQ = StringTrim[q]; $vqSpoken = None; $vqSpeakerLang = None; $vqLLMJob = None;
   $vqParts = <||>; $vqFinish = False;
   $vqId = "vq-" <> StringReplace[CreateUUID[], "-" -> ""];
   vqWrite[Cell[TextData[{StyleBox["🎤 Q (発表者へ音声で): ", FontColor -> RGBColor[0.55, 0.25, 0.1]], $vqQ}],
@@ -1287,7 +1676,7 @@ VoiceQuestionFinish[] := If[$vqSt === "listening", $vqFinish = True; "回答を�
 
 VoiceQuestionStop[] := (
   If[$vqSt =!= "idle" && vqRealtimeQ[], Quiet@SourceVault`SourceVaultRealtimeCancel[]];
-  Scan[Quiet@KillProcess[#["Process"]] &, $vqJobs]; $vqJobs = {};
+  Scan[(Quiet@KillProcess[#["Process"]]; plCurlAuthDone[Lookup[#, "Auth", {}]]) &, $vqJobs]; $vqJobs = {};
   $vqSt = "idle"; vqSay[""]; vqStopSession[]; vqStopTask[]; "Stopped.")
 
 VoiceQuestionStatus[] := <|"State" -> $vqSt, "Status" -> $vqStatus, "Model" -> vqModel[],
@@ -1312,7 +1701,7 @@ vqAnswerText[] := Module[{parts = Values[KeySort[$vqParts]], tail = $vqLastUser}
       !AnyTrue[parts, StringContainsQ[vqNorm[#], vqNorm[tail]] &],
     AppendTo[parts, tail]];
   StringTrim[StringRiffle[parts, " "]]]
-$vqBaseUser = "";
+plKeep[$vqBaseUser, ""];
 
 vqTick[] := Quiet@Check[(vqPollJobs[]; vqStep[]), Null]
 
@@ -1320,6 +1709,9 @@ vqStep[] := Module[{now = AbsoluteTime[], st},
   Switch[$vqSt,
   "preparing",
     If[now - $vqT0 > 45, vqFail["音声セッションの準備が 45 秒で終わりませんでした。"]; Return[]];
+    (* 質問の訳を頼んだジョブが callback 無しで終わった: 原文のまま読む *)
+    If[!StringQ[$vqSpoken] && plJobGoneQ[$vqLLMJob],
+      $vqSpeakerLang = None; $vqSpoken = $vqQ];
     If[!StringQ[$vqSpoken], Return[]];
     st = SourceVault`SourceVaultRealtimeStatus[];
     If[!TrueQ[st["Running"]], vqFail["音声セッションが終了しました: " <> ToString[st["LastError"]]]; Return[]];
@@ -1359,7 +1751,10 @@ vqStep[] := Module[{now = AbsoluteTime[], st},
       If[TrueQ[st["Running"]], SourceVault`SourceVaultRealtimeMute[True]];
       vqDeliverAnswer[vqAnswerText[]]],
 
-  "translating", Null,
+  (* 回答の訳: callback が来ない (ジョブが消えた / 期限切れ) なら原文に [翻訳失敗] を付けて終える *)
+  "translating",
+    If[plJobGoneQ[$vqLLMJob] || now - $vqT0 > plLLMTimeout[],
+      vqWrite[vqAnswerCell[$vqAns <> "  [翻訳失敗]"]]; vqDone[]],
 
   "idle",
     (* 使い終わったセッションは $VoiceQuestionIdleSeconds で切る (GPT-Live は接続時間で課金) *)
@@ -1386,6 +1781,8 @@ vqDeliverAnswer[ans_String] := Module[{out = plOutLang[], os},
       FontSize -> 11, CellMargins -> {{30, 20}, {5, 5}}]];
     vqDone[]; Return[]];
   plSVAppend["ASRTranscript", "[VoiceQuestion の回答] " <> ans];
+  (* まとめ (ListenerSummary) で「発表者が答えて解決した点」を判断できるよう残す *)
+  AppendTo[$plQALog, <|"Q" -> $vqQ, "A" -> ans, "time" -> elapsed[]|>];
   os = vqLangScript[out];
   (* 出力言語と同じ文字種なら訳さずにそのまま出す *)
   If[os =!= None && vqScript[ans] === os,
@@ -1395,13 +1792,16 @@ vqDeliverAnswer[ans_String] := Module[{out = plOutLang[], os},
     StyleBox["Answer: ", FontWeight -> Bold, FontSize -> 10, FontColor -> GrayLevel[0.6]],
     StyleBox[ans, FontSize -> 10, FontColor -> GrayLevel[0.6], FontSlant -> Italic]}], "Text",
     CellMargins -> {{30, 20}, {2, 2}}]];
-  $vqSt = "translating"; vqSay["回答を訳しています…"];
-  vqLLM["Translate the presenter's spoken answer below into " <> plLangName[out] <>
+  $vqSt = "translating"; $vqT0 = AbsoluteTime[]; $vqAns = ans; $vqLLMJob = None;
+  vqSay["回答を訳しています…"];
+  $vqLLMJob = With[{id = $vqId}, vqLLM["Translate the presenter's spoken answer below into " <> plLangName[out] <>
     ". It is a speech transcript: keep the meaning faithfully, fix obvious recognition errors " <>
     "using the question as context, and do not summarize. If it is already in " <> plLangName[out] <>
     ", return it unchanged. Output the translation only.\n\nQuestion: " <> $vqQ <>
     "\n\nAnswer transcript:\n" <> ans,
-    Function[r, (vqWrite[vqAnswerCell[If[StringQ[r], r, ans <> "  [翻訳失敗]"]]]; vqDone[])]]]
+    (* vqStep が諦めた後 / 次の質問に移った後に届いた訳は捨てる *)
+    Function[r, If[$vqSt === "translating" && $vqId === id,
+      vqWrite[vqAnswerCell[If[StringQ[r], r, ans <> "  [翻訳失敗]"]]]; vqDone[]]]]]]
 
 voiceQuestionDialog[] := Module[{q},
   If[$vqSt === "listening", VoiceQuestionFinish[]; Return[]];
@@ -1427,6 +1827,338 @@ ExportSession[fn_String] := Module[{c, f},
           #["commentary"])& /@ $segs,
         "\n\n---\n\n"], "(none)"] <> "\n\n---\n# Transcript\n\n" <> $transcript;
   f = If[FileExtension[fn] === "", fn <> ".md", fn]; Export[f, c, "Text"]]
+
+(* ============================================================ *)
+(*  ListenerSummary: ここまでの発表のまとめを別ノートへ (v24)       *)
+(*  記録 ($segs の発言・解説、解説前の発言、音声質問への回答) から    *)
+(*    要約 / 鍵になるポイント / 追加情報がないと理解できない点       *)
+(*  を LLM に JSON で作らせ、Template (SourceVault notebook        *)
+(*  template.nb、スタイルは SourceVault default.nb) 由来の別ノートに *)
+(*  Subsection / Subsubsection / Item / Subitem / Text で書く。       *)
+(*  まとめノートは 1 回の収録につき 1 冊。押すたびに「経過 mm:ss    *)
+(*  時点」の節を末尾に足す (前の節は残す)。presentation ノートが     *)
+(*  保存済みなら同じフォルダに …-summary.nb として保存・登録する。   *)
+(*  ⚡高速: curl で $ListenerSummaryModel、🔧標準: ClaudeQueryAsync。 *)
+(*  どちらも非ブロック (収録の tick と並行して動く)。                 *)
+(* ============================================================ *)
+
+plKeep[$plsSt, "idle"]; plKeep[$plsStatus, ""]; plKeep[$plsT0, 0]; plKeep[$plsJob, None]; plKeep[$plsTask, None];
+plKeep[$plsNB, None]; plKeep[$plsPath, None]; plKeep[$plsHeaderDone, False]; plKeep[$plsPendingTag, ""];
+plKeep[$plsMeta, <||>]; plKeep[$plsSave, True]; plKeep[$plsRunId, ""];
+plKeep[$plQALog, {}]; (* VoiceQuestion の Q と発表者の回答 *)
+$plsStale = 600;    (* これより長く返らない要約は捨てて押し直せるようにする (秒) *)
+
+plsL[ja_String, en_String] := If[plOutLang[] === "Japanese", ja, en]
+
+plsNBOK[] := Head[$plsNB] === NotebookObject &&
+  Quiet[Check[NBAccess`NBCellCount[$plsNB]; True, False], All]
+plsWr[cell_] := If[plsNBOK[], (NBAccess`NBMoveToEnd[$plsNB]; NBAccess`NBWriteCell[$plsNB, cell])]
+
+(* 収録を止めた後も elapsed[] は進み続けるので、停止後は最後のセクションの時刻 *)
+plsElapsed[] := If[!TrueQ[$running] && Length[$segs] > 0,
+  Lookup[Last[$segs], "time", elapsed[]], elapsed[]]
+
+(* まだ解説の付いていない発言: 解説生成中 (または停止で中断) の段落と溜まっている $buf *)
+plsPending[] := Module[{parts = {}},
+  If[StringQ[$pPara] && StringTrim[$pPara] =!= "" &&
+      (Length[$segs] == 0 || Lookup[Last[$segs], "text", ""] =!= $pPara),
+    AppendTo[parts, $pPara]];
+  If[StringQ[$buf] && StringTrim[$buf] =!= "", AppendTo[parts, $buf]];
+  If[parts === {} && Length[$segs] == 0 && StringQ[$transcript], parts = {$transcript}];
+  StringTrim[StringRiffle[parts, " "]]]
+
+(* 要約に渡す記録。発言がほとんど無ければ None *)
+plsContext[] := Module[{segs = $segs, pending = plsPending[], n, secs, qa},
+  n = Length[segs];
+  If[StringLength[StringTrim[StringJoin[Lookup[#, "text", ""] & /@ segs] <> pending]] < 40,
+    Return[None]];
+  secs = MapIndexed[buildSectionText[#1, First[#2]] &, segs];
+  If[pending =!= "",
+    AppendTo[secs, "=== セクション #" <> ToString[n + 1] <> " [解説前の最新の発言] ===\n【発言】\n" <> pending]];
+  qa = StringRiffle[("Q (聴衆): " <> #["Q"] <> "\nA (発表者): " <> #["A"]) & /@ $plQALog, "\n\n"];
+  <|"Text" -> StringRiffle[secs, "\n"], "QA" -> qa, "Sections" -> n,
+    "Pending" -> (pending =!= ""), "Elapsed" -> plsElapsed[], "Clock" -> ts[]|>]
+
+$plsPrompt = "あなたは理論計算機科学・数理科学に精通した研究者で、発表を聞いている聴衆のために要点を整理します。\
+以下は進行中の発表の、現時点までの記録です (発表はまだ続いているかもしれません)。\
+【発言】は発表者の発言の音声認識 (誤認識を含みうる)、【解説】は別の AI が付けた補足で、推測や一般知識を含みます。\
+発表者の主張としてまとめてよいのは【発言】に根拠がある内容だけです。\n\n\
+次の 3 つを作ってください。\n\
+1. summary: ここまでの発表の簡潔なまとめ (3〜6 文)。発表の目的・主な主張・いまどこまで話が進んだか。\n\
+2. key_points: 発表を理解するうえで鍵になるポイント (3〜7 個)。point は一文の要点、detail はなぜ重要か・どこで効いてくるか (1〜2 文)。\n\
+3. open_questions: 記録だけでは理解しきれず、疑問を解いたり質問したりして追加の情報を得ないと理解できない点 (0〜6 個)。\
+定義されないまま使われた用語・記号、飛ばされた論証の段、条件や根拠が示されていない主張、聞き取れない・曖昧な箇所、\
+スライドの図を見ないと分からない点など。point は何が分からないか、missing は理解に足りない情報 \
+(この後の発表で説明されそうならそう書く)、question は発表者にそのまま聞ける短い質問。\
+【質疑】で発表者が既に答えて解決した点は入れない。\n\
+sections には根拠になったセクション番号 (整数) を入れる。\
+数式は TeX で $…$ と書いてよい (JSON の文字列の中ではバックスラッシュを二重にする: \"$\\\\frac{1}{2}$\")。\
+強調は **…** でよい (ノートでは数式・太字に組まれる)。\n\n\
+出力は次の形の JSON オブジェクトだけにしてください (前置き・コードフェンス・注釈なし):\n\
+{\"title\": \"発表の題目 (推定。短い名詞句)\", \"summary\": \"...\", \
+\"key_points\": [{\"point\": \"...\", \"detail\": \"...\", \"sections\": [1]}], \
+\"open_questions\": [{\"point\": \"...\", \"missing\": \"...\", \"question\": \"...\", \"question_speaker\": \"...\", \"sections\": [2]}]}";
+
+plsLangInstr[] := With[{L = plLangName[plOutLang[]]},
+  "\n\n【出力言語】\ntitle・summary・point・detail・missing・question は必ず " <> L <>
+  " で書いてください (記録が別の言語でも)。発言の主な言語が " <> L <>
+  " でない場合に限り、question_speaker に同じ質問を発言の言語で書いてください (同じ言語なら \"\")。"]
+
+plsUser[ctx_Association] := "【記録】(経過 " <> ctx["Elapsed"] <> "、セクション " <>
+  ToString[ctx["Sections"]] <> If[TrueQ[ctx["Pending"]], " + 解説前の発言", ""] <> ")\n\n" <>
+  ctx["Text"] <> If[ctx["QA"] =!= "", "\n\n【質疑】\n" <> ctx["QA"], ""]
+
+(* ---- ⚡高速: Messages API を curl で直接 (plsTick が待つ) ----
+   新しいモデルには effort と、安全分類器に断られたとき Anthropic 推奨のモデルで
+   取り直す server-side fallback ("fallbacks": "default") を付ける。 *)
+plsModel[] := If[StringQ[$ListenerSummaryModel] && StringTrim[$ListenerSummaryModel] =!= "",
+  StringTrim[$ListenerSummaryModel], "claude-opus-5-5"]
+plsModernQ[m_String] := StringStartsQ[m, "claude-opus-5" | "claude-fable-5" | "claude-sonnet-5-5"]
+
+(* {本文, 追加ヘッダ (curl 引数)} *)
+plsRequest[sys_String, user_String] := Module[{m = plsModel[], body},
+  body = <|"model" -> m, "max_tokens" -> 16000, "system" -> sys,
+    "messages" -> {<|"role" -> "user", "content" -> user|>}|>;
+  If[!plsModernQ[m], Return[{body, {}}]];
+  body["output_config"] = <|"effort" -> "medium"|>;
+  body["fallbacks"] = "default";
+  {body, {"-H", "anthropic-beta: server-side-fallback-2026-07-01"}}]
+
+plsStartFast[sys_String, user_String, k_String] := Module[{dir, id, req, out, body, hdr, proc, auth},
+  dir = If[StringQ[$tmpDir] && DirectoryQ[$tmpDir], $tmpDir, $TemporaryDirectory];
+  id = StringReplace[CreateUUID[], "-" -> ""];
+  req = FileNameJoin[{dir, "pls_req_" <> id <> ".json"}];
+  out = FileNameJoin[{dir, "pls_resp_" <> id <> ".json"}];
+  {body, hdr} = plsRequest[sys, user];
+  If[plWriteJSON[req, body] === $Failed, Return[$Failed]];
+  auth = plCurlAuthArgs["anthropic", k];
+  If[auth === $Failed, Quiet@DeleteFile[req]; Return[$Failed]];
+  proc = Quiet@Check[StartProcess[Join[{"curl", "-s", "--max-time", "300", "-o", out, "-X", "POST",
+    "https://api.anthropic.com/v1/messages",
+    "-H", "Content-Type: application/json; charset=utf-8"}, auth,
+    {"-H", "anthropic-version: 2023-06-01"}, hdr, {"--data-binary", "@" <> req}]], None];
+  If[Head[proc] =!= ProcessObject, Quiet@DeleteFile[req]; plCurlAuthDone[auth]; Return[$Failed]];
+  $plsJob = <|"Process" -> proc, "Request" -> req, "Out" -> out, "Auth" -> auth, "Id" -> $plsRunId,
+    "Sys" -> sys, "User" -> user|>;
+  If[$plsTask === None, $plsTask = RunScheduledTask[plsTick[], 1]];
+  True]
+
+plsStopTask[] := (If[$plsTask =!= None, Quiet@RemoveScheduledTask[$plsTask]]; $plsTask = None)
+
+(* 🔧標準: ClaudeQueryAsync (CLI 優先)。応答は plsDeliver へ (自動セル化はさせない) *)
+plsStartStandard[sys_String, user_String] := With[{id = $plsRunId},
+  ClaudeQueryAsync[sys <> "\n\n---\n\n" <> user, Function[r, plsDeliver[r, id]], $plsNB,
+    Fallback -> billingAllowed[], AutoCellize -> False]]
+
+plsTick[] := Quiet@Check[
+  Which[
+    !AssociationQ[$plsJob], plsStopTask[],
+    ProcessStatus[$plsJob["Process"]] =!= "Running",
+      Module[{j = $plsJob, json, r},
+        $plsJob = None; plsStopTask[];
+        json = plReadJSON[j["Out"]];
+        Quiet@DeleteFile[{j["Out"], j["Request"]}]; plCurlAuthDone[Lookup[j, "Auth", {}]];
+        r = If[AssociationQ[json] && Lookup[json, "stop_reason", ""] === "refusal",
+          Failure["Refusal", <|"MessageTemplate" ->
+            plsL["モデルがこの要約の作成を断りました。", "The model declined to write this summary."]|>],
+          plExtractText[json]];
+        (* API エラー・無応答 (通信・タイムアウト・要求の形を拒否された等) は 🔧標準で 1 回取り直す *)
+        If[j["Id"] === $plsRunId && $plsSt === "running" &&
+            (r === $Failed || StringQ[r] && StringStartsQ[r, "[API Error"]),
+          $plsMeta["Info"] = $plsMeta["Info"] <> plsL[" (⚡ 失敗: ", " (⚡ failed: "] <>
+            If[StringQ[r], StringTake[r, UpTo[120]], plsL["応答なし", "no response"]] <> " → 🔧)";
+          plsEnsureNB[];
+          plsStartStandard[j["Sys"], j["User"]],
+          plsDeliver[r, j["Id"]]]]],
+  Null]
+
+(* ---- 応答 (JSON) を読む ---- *)
+plsParse[raw_String] := Module[{i = StringPosition[raw, "{", 1], j = StringPosition[raw, "}"], r},
+  If[i === {} || j === {} || j[[-1, 1]] < i[[1, 1]], Return[$Failed]];
+  r = Quiet@Check[ImportByteArray[StringToByteArray[
+    StringTake[raw, {i[[1, 1]], j[[-1, 1]]}], "UTF-8"], "RawJSON"], $Failed];
+  If[AssociationQ[r] && (KeyExistsQ[r, "summary"] || KeyExistsQ[r, "key_points"]),
+    r /. t_String :> plsFixTeXEscapes[t], $Failed]]
+plsParse[_] := $Failed
+
+(* TeX のバックスラッシュを二重にし忘れた JSON 文字列は \f \b \t \r が制御文字に化ける
+   (\frac → 改ページ + rac、\beta、\tau、\rho)。どれも本文には出ない文字なので戻す。
+   改行 (\n) は本文にもあるので、$…$ の中で英字が続くとき (\neq \nabla \nu) だけ戻す *)
+plsFixTeXEscapes[s_String] := StringReplace[
+  StringReplace[s, {
+    FromCharacterCode[12] -> "\\f", FromCharacterCode[8] -> "\\b",
+    FromCharacterCode[9] ~~ c : LetterCharacter :> "\\t" <> c,
+    FromCharacterCode[13] ~~ c : LetterCharacter :> "\\r" <> c}],
+  "$" ~~ m : Shortest[Except["$"] ..] ~~ "$" :>
+    "$" <> StringReplace[m, "\n" ~~ c : LetterCharacter :> "\\n" <> c] <> "$"]
+
+plsStr[a_Association, k_String] := With[{v = Lookup[a, k, ""]}, If[StringQ[v], StringTrim[v], ""]]
+plsStr[_, _] := ""
+plsItems[x_] := Select[Replace[If[ListQ[x], x, {}], s_String :> <|"point" -> s|>, {1}],
+  AssociationQ[#] && plsStr[#, "point"] =!= "" &]
+plsRefs[a_Association] := With[{s = Select[Replace[Flatten[{Lookup[a, "sections", {}]}],
+      t_String /; StringMatchQ[StringTrim[t, "#"], DigitCharacter ..] :> ToExpression[StringTrim[t, "#"]], {1}],
+      IntegerQ]},
+  If[s === {}, {}, {StyleBox["  (" <> StringRiffle[("#" <> ToString[#]) & /@ s, ", "] <> ")",
+    FontColor -> GrayLevel[0.55], FontSize -> 11]}]]
+
+(* ---- まとめノートのセル (Template のスタイル) ---- *)
+plsNoneCell[] := Cell[plsL["(現時点では特になし)", "(none so far)"], "Text", FontColor -> GrayLevel[0.5]]
+plsInfoCell[s_String] := Cell[s, "Text", FontSize -> 10, FontColor -> GrayLevel[0.5]]
+
+(* 要点・詳細・質問案などの文字列は plMarkdownParts で数式・太字つきの部品にする (v24b) *)
+plsLabelParts[label_String, s_String] := Join[{StyleBox[label, FontWeight -> "Bold"]}, plMarkdownParts[s]]
+
+plsKeyPointCells[a_Association] := With[{d = plsStr[a, "detail"]},
+  Join[{Cell[TextData[Join[plBoldParts[plMarkdownParts[plsStr[a, "point"]]], plsRefs[a]]], "Item"]},
+    If[d === "", {}, {Cell[TextData[plMarkdownParts[d]], "Subitem"]}]]]
+
+plsQuestionCells[a_Association, i_Integer] := Module[{m = plsStr[a, "missing"],
+    q = plsStr[a, "question"], qs = plsStr[a, "question_speaker"]},
+  Join[{Cell[TextData[Join[{StyleBox["Q" <> ToString[i] <> "  ", FontWeight -> "Bold",
+      FontColor -> RGBColor[0.6, 0.3, 0.1]]}, plMarkdownParts[plsStr[a, "point"]], plsRefs[a]]], "Item"]},
+    If[m === "", {}, {Cell[TextData[plsLabelParts[plsL["不足している情報: ", "Missing: "], m]], "Subitem"]}],
+    If[q === "", {}, {Cell[TextData[plsLabelParts[plsL["質問案: ", "Question: "], q]], "Subitem"]}],
+    If[qs === "" || qs === q, {}, {Cell[TextData[plsLabelParts[
+      plsL["発表者の言語で: ", "In the speaker's language: "], qs]], "Subitem", FontColor -> GrayLevel[0.4]]}]]]
+
+plsSnapshotCell[data_Association, meta_Association] := Module[{s = plsStr[data, "summary"],
+    kp = plsItems[Lookup[data, "key_points", {}]], oq = plsItems[Lookup[data, "open_questions", {}]]},
+  Cell[CellGroupData[Join[
+    {Cell[meta["Heading"], "Subsection"], plsInfoCell[meta["Info"]],
+     Cell[plsL["要約", "Summary"], "Subsubsection"]},
+    If[s === "", {plsNoneCell[]}, plMarkdownCells[s]],
+    {Cell[plsL["鍵になるポイント", "Key points"], "Subsubsection"]},
+    If[kp === {}, {plsNoneCell[]}, Join @@ (plsKeyPointCells /@ kp)],
+    {Cell[plsL["追加情報がないと理解できない点", "Points that need more information"], "Subsubsection"]},
+    If[oq === {}, {plsNoneCell[]}, Join @@ MapIndexed[plsQuestionCells[#1, First[#2]] &, oq]]],
+    Open]]]
+
+(* JSON として読めなかったときは応答をそのまま載せる (内容は捨てない。Markdown は整形する) *)
+plsRawCell[raw_String, meta_Association] := Cell[CellGroupData[Join[{
+    Cell[meta["Heading"], "Subsection"],
+    plsInfoCell[meta["Info"] <> plsL[" · 形式を読めなかったので応答をそのまま載せます",
+      " · could not parse the response; shown as is"]]},
+    plMarkdownCells[raw]], Open]]
+
+plsWriteHeader[title_String] := (
+  plsWr[Cell[If[title === "", plsL["発表のまとめ", "Presentation summary"], title], "Title"]];
+  plsWr[plsInfoCell[plsL["PresentationListener のまとめ · ", "PresentationListener summary · "] <>
+    DateString[{"Year", "-", "Month", "-", "Day"}] <>
+    If[StringQ[$nbPath], plsL[" · 記録: ", " · record: "] <> FileNameTake[$nbPath], ""] <>
+    If[StringQ[$plSVSession], " · SourceVault: " <> $plSVSession, ""]]];
+  $plsHeaderDone = True)
+
+(* まとめノートを Template から開く (SourceVaultNewNotebook = makeNB と同じ口)。
+   NotebookStatus は残し (Keywords: presentation/summary、SessionID で発表へ逆リンク)、
+   見本セル (TodoItem_1 の「todo item」と Subsubsection の「Template」) は消す。 *)
+plsEnsureNB[] := Module[{res, nbObj, tag, idx},
+  If[plsNBOK[], Return[$plsNB]];
+  $plsPath = None; $plsHeaderDone = False;
+  res = If[Length[Names["SourceVault`SourceVaultNewNotebook"]] > 0,
+    Quiet @ Check[SourceVault`SourceVaultNewNotebook[
+      "Title" -> "Presentation Summary", "Keywords" -> {"presentation", "summary"},
+      "SessionID" -> $plSVSession], $Failed],
+    $Failed];
+  nbObj = If[AssociationQ[res] && Lookup[res, "Status", ""] === "OK",
+    Lookup[res, "Notebook", None], None];
+  If[Head[nbObj] === NotebookObject,
+    $plsNB = nbObj;
+    tag = "pl-summary-template-" <> StringReplace[CreateUUID[], "-" -> ""];
+    idx = Quiet@NBAccess`NBCellIndicesByStyle[$plsNB, {"TodoItem_1", "Subsubsection"}];
+    If[ListQ[idx] && idx =!= {},
+      Scan[NBAccess`NBCellSetOptions[$plsNB, #, CellTags -> {tag}] &, Select[idx, IntegerQ]];
+      Quiet@NBAccess`NBDeleteCellsByTag[$plsNB, tag]],
+    $plsNB = CreateDocument[{}, WindowTitle -> "Presentation Summary", WindowSize -> {700, 800},
+      Saveable -> True]];
+  $plsNB]
+
+(* 初回は presentation ノートの隣 (未保存なら既定フォルダ) に …-summary.nb で保存して登録、
+   2 回目以降は同じファイルへ上書き保存 *)
+plsSummaryBase[b_String] := If[StringContainsQ[b, "-presentation"],
+  StringReplace[b, "-presentation" -> "-summary"], b <> "-summary"]
+
+plsSave[title_String] := Module[{folder, base, path},
+  If[!TrueQ[$plsSave] || !plsNBOK[], Return[Null]];
+  If[StringQ[$plsPath], Quiet@Check[NotebookSave[$plsNB], Null]; Return[Null]];
+  folder = If[StringQ[$nbPath], DirectoryName[$nbPath], plResolveNBFolder[]];
+  If[!StringQ[folder] || !DirectoryQ[folder], Return[Null]];
+  base = plsSummaryBase[FileBaseName[If[StringQ[$nbPath], $nbPath,
+    plNBFileName[If[title === "", "presentation", title]]]]];
+  path = plUniquePath[folder, base <> ".nb"];
+  If[Quiet@Check[NotebookSave[$plsNB, path]; True, False] =!= True, Return[Null]];
+  $plsPath = path;
+  If[Length[Names["SourceVault`SourceVaultRegisterNotebook"]] > 0,
+    Quiet @ Check[SourceVault`SourceVaultRegisterNotebook[path], Null]];
+  plSVLinkNotebook[path]]
+
+plsFail[msg_String] := (
+  If[!plsNBOK[], plsEnsureNB[]];
+  plsWr[Cell[plsL["まとめを作れませんでした: ", "Could not write the summary: "] <> msg,
+    "Text", FontColor -> RGBColor[0.7, 0.1, 0.1], FontSize -> 11]];
+  $plsSt = "idle"; $plsStatus = plsL["まとめ失敗: ", "Summary failed: "] <> msg)
+
+plsDeliver[r_, id_] := Module[{meta = $plsMeta, raw, data},
+  If[$plsSt =!= "running" || id =!= $plsRunId, Return[Null]];   (* 捨てた要約が後から返ってきた *)
+  If[plsNBOK[] && $plsPendingTag =!= "", Quiet@NBAccess`NBDeleteCellsByTag[$plsNB, $plsPendingTag]];
+  raw = Which[StringQ[r], vqClean[r], True, $Failed];
+  If[FailureQ[r], Return[plsFail[Replace[Quiet[r["Message"]], Except[_String] ->
+    plsL["応答を取得できませんでした (タイムアウトか通信エラー)。", "No response (timeout or network error)."]]]]];
+  If[!StringQ[raw] || raw === "" || StringStartsQ[raw, "Error:" | "[API Error" | "[ERROR]"],
+    Return[plsFail[If[StringQ[raw] && raw =!= "", StringTake[raw, UpTo[300]],
+      plsL["応答を取得できませんでした。", "No response."]]]]];
+  data = plsParse[raw];
+  If[!plsNBOK[], plsEnsureNB[]];   (* 待っている間にノートが閉じられた *)
+  If[!$plsHeaderDone, plsWriteHeader[If[AssociationQ[data], plsStr[data, "title"], ""]]];
+  plsWr[If[AssociationQ[data], plsSnapshotCell[data, meta], plsRawCell[raw, meta]]];
+  plsSave[If[AssociationQ[data], plsStr[data, "title"], ""]];
+  plSVAppend["SystemSummary", "[まとめ " <> meta["Elapsed"] <> "] " <>
+    If[AssociationQ[data], plsStr[data, "summary"], raw]];
+  $plsSt = "idle";
+  $plsStatus = plsL["まとめ ", "Summary "] <> meta["Elapsed"] <> " ✓"]
+
+plsAbort[] := (
+  If[AssociationQ[$plsJob], Quiet@KillProcess[$plsJob["Process"]];
+    Quiet@DeleteFile[{$plsJob["Out"], $plsJob["Request"]}]; plCurlAuthDone[Lookup[$plsJob, "Auth", {}]]];
+  $plsJob = None; plsStopTask[];
+  If[plsNBOK[] && $plsPendingTag =!= "", Quiet@NBAccess`NBDeleteCellsByTag[$plsNB, $plsPendingTag]];
+  $plsSt = "idle")
+
+plsEngine[fast_] := If[TrueQ[fast], "⚡ " <> plsModel[], "🔧 ClaudeQueryAsync"]
+
+Options[ListenerSummary] = {"Save" -> True};
+ListenerSummary[OptionsPattern[]] := Module[{ctx, k, fast, sys, user},
+  If[$plsSt === "running",
+    If[AbsoluteTime[] - $plsT0 < $plsStale,
+      Return[$plsStatus = plsL["まとめを作成中です…", "Writing the summary…"]]];
+    plsAbort[]];
+  ctx = plsContext[];
+  If[ctx === None,
+    Return[$plsStatus = plsL["まだまとめるほどの発言がありません。", "Nothing to summarize yet."]]];
+  $plsSave = TrueQ[OptionValue["Save"]];
+  plsEnsureNB[];
+  If[!plsNBOK[], Return[$plsStatus = plsL["まとめ用のノートを開けませんでした。",
+    "Could not open the summary notebook."]]];
+  Quiet@SetSelectedNotebook[$plsNB];
+  k = If[effectiveFastMode[], anthropicAPIKey[], $Failed];
+  fast = StringQ[k];
+  sys = $plsPrompt <> plsLangInstr[]; user = plsUser[ctx];
+  $plsMeta = <|"Elapsed" -> ctx["Elapsed"],
+    "Heading" -> plsL["まとめ — 経過 " <> ctx["Elapsed"] <> " 時点", "Summary at " <> ctx["Elapsed"]],
+    "Info" -> plsL["セクション " <> ToString[ctx["Sections"]] <>
+        If[TrueQ[ctx["Pending"]], " + 解説前の発言", ""] <> " · " <> ctx["Clock"] <> " 作成 · ",
+      ToString[ctx["Sections"]] <> " sections" <> If[TrueQ[ctx["Pending"]], " + pending speech", ""] <>
+        " · " <> ctx["Clock"] <> " · "] <> plsEngine[fast]|>;
+  $plsPendingTag = "pl-summary-pending-" <> StringReplace[CreateUUID[], "-" -> ""];
+  plsWr[Cell["⏳ " <> plsL["まとめを作成中… (経過 " <> ctx["Elapsed"] <> " 時点)",
+    "Writing the summary… (at " <> ctx["Elapsed"] <> ")"], "Text",
+    FontColor -> GrayLevel[0.5], FontSize -> 11, CellTags -> {$plsPendingTag}]];
+  $plsSt = "running"; $plsT0 = AbsoluteTime[]; $plsRunId = CreateUUID[];
+  $plsStatus = plsL["まとめを作っています…", "Writing the summary…"];
+  If[fast && plsStartFast[sys, user, k] =!= True,
+    fast = False; $plsMeta["Info"] = StringReplace[$plsMeta["Info"], plsEngine[True] -> plsEngine[False]]];
+  If[!fast, plsStartStandard[sys, user]];
+  plsL["まとめを作成しています…", "Writing the summary…"]]
 
 (* ============================================================ *)
 (*  ProcessCells (iWriteQueryResponse 共有)                       *)
@@ -1493,8 +2225,10 @@ ProcessCells[prompt_String, nb_] := Module[{selIdxs, cellExprs, allText, imgB64s
         NBAccess`NBDeleteCellsByTag[nb0, tag0];
         NBAccess`NBMoveToEnd[nb0];
         NBAccess`NBWriteCell[nb0, Cell[l0, "Subsection"]];
-        ClaudeCode`Private`iWriteQueryResponse[nb0, ans]]],
-      nb0, Fallback -> billingAllowed[]]]]
+        (* iWriteQueryResponse は ClaudeCode` 直下にある (ClaudeCode`Private` の名前は
+           定義が無く何も書かず、結果は自動セル化で見出しより上に出ていた) *)
+        ClaudeCode`iWriteQueryResponse[nb0, ans]]],
+      nb0, Fallback -> billingAllowed[], AutoCellize -> False]]]
 
 processDialog[] := Module[{prompt, targetNB},
   targetNB = InputNotebook[];
@@ -1512,8 +2246,8 @@ processDialog[] := Module[{prompt, targetNB},
 (*  設定                                                          *)
 (* ============================================================ *)
 
-$cfgDevice = Automatic; $cfgVideoDevice = Automatic;
-$cfgCaptureIntv = 15; $cfgSlideThresh = 0.1; $palette = None;
+plKeep[$cfgDevice, Automatic]; plKeep[$cfgVideoDevice, Automatic];
+plKeep[$cfgCaptureIntv, 15]; plKeep[$cfgSlideThresh, 0.1]; plKeep[$palette, None];
 
 resolveAudioDevice[Automatic] := Module[{dev}, dev = Quiet@getDefaultAudioDevice[];
   If[AssociationQ[dev], deviceId[dev], None]]
@@ -1529,7 +2263,7 @@ resolveVideoDevice[id_String] := id
    Dynamic の中では行わず、ShowPalette を開いたときと Settings の OK のときだけ
    plRefreshDeviceLabels[] で $plDevLabels に焼き込む。収録中は $dev / $vidDev
    (実際に開いているデバイス) を優先して表示する。 *)
-$plDevLabels = <||>;
+plKeep[$plDevLabels, <||>];
 
 (* dshow の ID (alt 名 "@device_pnp_..." か表示名) から表示名へ。一覧に無ければ ID のまま *)
 deviceName[id_String, devs_List] := Module[{m},
@@ -1674,6 +2408,14 @@ ShowPalette[] := Module[{srcNB},
       Dynamic[If[StringQ[$vqStatus] && $vqStatus =!= "",
           Pane[Style[$vqStatus, 8, RGBColor[0.55, 0.3, 0.1]], 100], ""],
         TrackedSymbols :> {$vqStatus}],
+      (* ここまでの発表のまとめを別ノートへ (v24)。作成中も押せる (状況を返すだけ) *)
+      Dynamic[If[$plsSt === "running",
+          plButton["⏳ まとめ中…", GrayLevel[0.55], ListenerSummary[]],
+          plButton["📝 まとめ", RGBColor[0.15, 0.5, 0.55], ListenerSummary[]]],
+        TrackedSymbols :> {$plsSt}],
+      Dynamic[If[StringQ[$plsStatus] && $plsStatus =!= "",
+          Pane[Style[$plsStatus, 8, RGBColor[0.1, 0.4, 0.45]], 100], ""],
+        TrackedSymbols :> {$plsStatus}],
       plButton["\[RightPointer] Process", RGBColor[0.55, 0.45, 0.2], processDialog[]],
       Spacer[2],
       Style[" 設定", Bold, 8, GrayLevel[0.3]],

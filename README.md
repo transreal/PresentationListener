@@ -30,12 +30,24 @@ ffmpeg の実行ファイルは PATH だけに頼らず、`$FFmpegPath`、PATH�
 
 本パッケージは処理モードを二系統持っています。
 
-- **⚡ 高速モード** (`$plFastMode = True`、課金 API 許可時のみ): `StartProcess[curl]` で Anthropic API に直接 POST し、`tick[]` 内のポーリングで完了を検出します。PowerShell や Claude Code CLI の起動コストがゼロになるため、低遅延での解説生成が可能です。内部状態マシンは `idle → transcribing → correcting → commenting → idle` の順で遷移します。
+- **⚡ 高速モード** (`$plFastMode = True`、課金 API 許可時のみ): `StartProcess[curl]` で Anthropic API に直接 POST し、`tick[]` 内のポーリングで完了を検出します。PowerShell や Claude Code CLI の起動コストがゼロになるため、低遅延での解説生成が可能です。質問 (`AskQuestion`) への回答や「まとめ」も同じ経路で API を直接呼び出します。内部状態マシンは `idle → transcribing → correcting → commenting → idle` の順で遷移します。
 - **🔧 標準モード** (課金 API 禁止時、または明示切り替え時): [claudecode](https://github.com/transreal/claudecode) の `ClaudeQueryAsync` を使用し、Claude Code CLI 経由で安定した動作を提供します。状態マシンは `idle → transcribing → llmBusy(callback) → idle` で遷移します。
+
+### 質問 (AskQuestion)
+
+`AskQuestion[q]` は、セッション全体の書き起こし・解説に加え、質問に関係するセクションのスライド画像 (`#N` 指定があればそのセクション、なければ質問の語との重なりで選んだ上位セクション) も添えて Claude に送ります。送信するとすぐ「⏳ 回答を待っています…」がノートブックに書かれ、回答が届いたら置き換えられます。応答がない場合は黙って消えず、タイムアウトや失敗の理由が残ります (🔧標準モードの待ち時間は `$AskQuestionTimeout`、既定 600 秒)。「スライドのプロットを Mathematica で再現して」のような質問には、そのまま評価できるコードが Input セルで返ります。
 
 ### 音声質問 (Voice Q)
 
 `VoiceQuestion[q]` は、質問を発表者の言語へ翻訳 (LLM) し、音声で読み上げ、マイクを開いて発表者の声を書き起こし、回答を原文セルと出力言語への訳セルとしてノートブックに残します。読み上げ以外は音声モデルに話させず、回答が止まる (無音が `$VoiceQuestionSilence` 秒続く) か `VoiceQuestionFinish[]` で確定されます。音声ブリッジには [SourceVault_realtime](https://github.com/transreal/SourceVault_realtime) を使用するため、SourceVault のロードとパレットの「課金API: 許可」が必要です。
+
+### 解説・回答の整形
+
+LLM が返す解説・質問への回答・まとめは Markdown と TeX を含みますが、そのまま Text セルには入れず、[claudecode](https://github.com/transreal/claudecode) の `MarkdownToCells` で Mathematica のセルに組んでから書き込みます。`$…$` / `$$…$$` / `\(…\)` は数式 (書かれたとおりに組むので `F(x)` が `F[x]` になりません)、`**…**` は太字、`` `…` `` は等幅、`- ` の箇条は Item、`###` は Subsubsection になります。
+
+### まとめ (📝 まとめ)
+
+`ListenerSummary[]` は、その時点までの発表の **簡潔なまとめ**・**鍵になるポイント**・**疑問や質問などの追加情報がないと理解できない点** (不足している情報と質問案つき) を、Template ノートブック (`Templates/SourceVault notebook template.nb`) のスタイルで別ノートに書き出します。押すたびに「経過 mm:ss 時点」の節が足され、presentation ノートの隣に `…-summary.nb` として保存・SourceVault 登録されます。音声質問で発表者が答えた点は「解決済み」として扱われます。
 
 ### SourceVault との統合
 
@@ -43,11 +55,11 @@ ffmpeg の実行ファイルは PATH だけに頼らず、`$FFmpegPath`、PATH�
 
 ### ノートブック保存戦略
 
-セッション中、最初の解説セクションからタイトルが読み取れた時点で `yyyymmdd-<タイトル>-presentation.nb` というファイル名で保存されます。保存先は `"NotebookFolder"` オプションで指定でき、Automatic なら SourceVault の既定フォルダ → `$onWork` → `$packageDirectory` の順で解決されます。以後の書き込みは `NotebookSave` による差分更新のため、Mathematica のクラッシュ時にも内容が保持されます。セッション終了時には SourceVault に即時インデックス化されます。
+セッション中、最初の解説セクションからタイトルが読み取れた時点で `yyyymmdd-<タイトル>-presentation.nb` というファイル名で保存されます。保存先は `"NotebookFolder"` オプションで指定でき、Automatic なら SourceVault の既定フォルダ → `$onWork` → 前に保存したフォルダ → `~/Dropbox/On Work` → `$packageDirectory` → `$UserDocumentsDirectory` の順で解決されます。以後の書き込みは `NotebookSave` による差分更新のため、Mathematica のクラッシュ時にも内容が保持されます。セッション終了時には SourceVault に即時インデックス化されます。
 
 ### API キー管理
 
-Whisper 用 OpenAI キーおよび Anthropic キーは [NBAccess](https://github.com/transreal/NBAccess) の `NBGetAPIKey` を通じて取得します。現行 NBAccess は `AccessLevel >= 1.0` を要求するため、パッケージ内部で `PrivacySpec -> <|"AccessLevel" -> 1.0|>` を明示的に指定しています。OpenAI キーが「未登録」なのか「登録済みだが取得拒否」なのかは、`StartListener[]` の失敗メッセージで区別されます。
+Whisper 用 OpenAI キーおよび Anthropic キーは [NBAccess](https://github.com/transreal/NBAccess) の `NBGetAPIKey` を通じて取得します。現行 NBAccess は `AccessLevel >= 1.0` を要求するため、パッケージ内部で `PrivacySpec -> <|"AccessLevel" -> 1.0|>` を明示的に指定しています。OpenAI キーが「未登録」なのか「登録済みだが取得拒否」なのかは、`StartListener[]` の失敗メッセージで区別されます。API キーは curl のコマンドラインには載せず、一時ヘッダファイル (`-H @file`) 経由で渡し、応答を読んだ直後に削除されます。
 
 ---
 
@@ -60,10 +72,10 @@ Whisper 用 OpenAI キーおよび Anthropic キーは [NBAccess](https://github
 | Mathematica | 13.0 以上 |
 | OS | Windows 11 |
 | ffmpeg | 導入済みであること (音声・映像キャプチャ、セグメント録音、DirectShow デバイス列挙に使用。PATH 外でも既知の場所は自動検出) |
-| curl | PATH が通っていること (Whisper / Anthropic API 直接呼び出しに使用) |
+| curl | 7.55 以上が PATH にあること (Whisper / Anthropic API 直接呼び出しに使用) |
 | [claudecode](https://github.com/transreal/claudecode) | 導入済みであること |
 | [NBAccess](https://github.com/transreal/NBAccess) | 導入済みであること |
-| [SourceVault](https://github.com/transreal/SourceVault) | 任意。セッション記録・ノートブック保存先解決に使用 |
+| [SourceVault](https://github.com/transreal/SourceVault) | 任意。セッション記録・ノートブック保存先解決・まとめノートのテンプレートに使用 |
 | [SourceVault_realtime](https://github.com/transreal/SourceVault_realtime) | 任意。音声質問 (`VoiceQuestion`) に使用 |
 | OpenAI API キー | Whisper 書き起こし用 |
 | Anthropic API キー | Claude 解説生成用 |
@@ -108,6 +120,8 @@ Block[{$CharacterEncoding = "UTF-8"},
   Needs["PresentationListener`", "PresentationListener.wl"]
 ]
 ```
+
+録音中に `Get["PresentationListener.wl"]` で再ロードしても、進行中のセッションは消えず定義だけが差し替わります。
 
 #### 5. API キーの設定
 
@@ -170,6 +184,8 @@ ExportSession["lecture_notes"]
 | `$ListenerAudioOnly` | `False` | `True` で Web カメラを使わず音声のみ収録 |
 | `$FFmpegPath` | (未設定) | ffmpeg 実行ファイルの明示パス |
 | `$VoiceQuestionSilence` | (パッケージ既定) | 音声質問で回答を確定するまでの無音秒数 |
+| `$ListenerSummaryModel` | `"claude-opus-5-5"` | ⚡高速モードでまとめ・質問への回答に使うモデル |
+| `$AskQuestionTimeout` | `600` | 🔧標準モードで質問の回答を待つ秒数 |
 | `"Language"` | `Automatic` | 発表言語 (ISO コードまたは言語名。Automatic で Whisper が自動判定) |
 | `"OutputLanguage"` | `Automatic` | 解説・Q&A・タイトルの出力言語 (Automatic で `$Language`) |
 | `"AudioOnly"` | `Automatic` | `True` で音声のみ、`False` で画像+音声 (Automatic は `$ListenerAudioOnly` の現在値) |
@@ -197,7 +213,7 @@ ExportSession["lecture_notes"]
 
 #### クエリ & エクスポート
 
-- **`AskQuestion[q]`** — セッション全体の書き起こし・解説・スライドを文脈として Claude に質問を送信し、結果を出力言語でノートブックに書き込みます (非同期)。`#N` でセクション番号を指定できます。
+- **`AskQuestion[q]`** — セッション全体の書き起こし・解説・スライドを文脈として Claude に質問を送信し、結果を出力言語でノートブックに書き込みます (非同期)。送信直後に「回答を待っています」の表示が書かれ、回答で置き換えられます。`#N` でセクション番号を指定できます。質問に合うセクションのスライド画像も添えて送り、「このスライドのプロットを Mathematica で再現して」のような質問には、そのまま評価できるコードを Input セルで返します。
 - **`GetTranscript[]`** — セッション全体の書き起こしテキストを返します。
 - **`GetSegments[]`** — 解析済みセグメントのリストを返します。各要素は `<|"text" -> ..., "commentary" -> ..., "translation" -> ..., "time" -> ..., "timestamp" -> ..., "slides" -> {Image, ...}|>` の形式です。`"translation"` は発言が出力言語と異なるときの訳です。
 - **`ExportSession[fn]`** — セッション内容を Markdown ファイルとして書き出します。
@@ -208,6 +224,10 @@ ExportSession["lecture_notes"]
 - **`VoiceQuestionFinish[]`** — 回答の聞き取りを現時点で打ち切り、確定します。
 - **`VoiceQuestionStop[]`** — 音声質問を中止し、自分で開いた音声セッションを閉じます。
 - **`VoiceQuestionStatus[]`** — 現在の状態 (`idle` / `preparing` / `speaking` / `listening` / `translating` など) を Association で返します。
+
+#### まとめ
+
+- **`ListenerSummary[]`** — その時点までの発表のまとめ・鍵になるポイント・追加情報がないと理解できない点を、Template 由来の別ノートに節として書き足します (非ブロック、収録停止後も可)。`"Save" -> False` で保存しません。
 
 #### ノートブック処理
 
@@ -222,11 +242,11 @@ ExportSession["lecture_notes"]
 
 #### 状態確認 & パレット
 
-- **`ShowPalette[]`** — コントロールパレットを表示します。Start / Stop / Capture / Question / Voice Q / Process Cells ボタン、収録モード (画像+音声 / 音声のみ)・処理モード・モデル・エフォート・課金 API 許可の切替、Settings、Diagnostics を備えます。使用中のマイク・カメラも常時表示されます。Palettes メニューの **Presentation Listener** からも起動できます。
+- **`ShowPalette[]`** — コントロールパレットを表示します。Start / Stop / Capture / Question / Voice Q / 📝 まとめ / Process Cells ボタン、収録モード (画像+音声 / 音声のみ)・処理モード・モデル・エフォート・課金 API 許可の切替、Settings、Diagnostics を備えます。使用中のマイク・カメラも常時表示されます。Palettes メニューの **Presentation Listener** からも起動できます。
 - **`ListenerStatus[]`** — 現在の状態を人間が読める文字列で返します (`"Recording [00:03:42]"` または `"Stopped"`)。
 - **`ListenerRunningQ[]`** — 現在録音中かどうかを `True` / `False` で返します。
 - **`ListenerSourceVaultSession[]`** — 現在の SourceVault セッション ID を返します (同期 OFF・未開始なら `None`)。
-- **`DiagState[]`** — 内部状態の診断情報を出力します。トラブルシューティングに使用します。
+- **`DiagState[]`** — 内部状態の診断情報 (質問の待ち状況を含む) を出力します。トラブルシューティングに使用します。
 
 #### 診断・テスト
 
@@ -296,6 +316,9 @@ StartListener["Language" -> "English", "OutputLanguage" -> "Japanese"]
 (* 特定セクションの内容について深掘りする *)
 AskQuestion["#2 の定理と #3 の補題の関係を説明して"]
 
+(* スライドのプロットを Mathematica コードで再現させる *)
+AskQuestion["このスライドのプロットを Mathematica で再現して"]
+
 (* 発表全体の要点をまとめさせる *)
 AskQuestion["この発表全体の要点を 3 点でまとめて"]
 ```
@@ -308,6 +331,13 @@ VoiceQuestion["この手法の計算量はどのくらいですか?"]
 
 (* 回答が終わったら確定する (パレットの「✓ 回答を確定」と同じ) *)
 VoiceQuestionFinish[]
+```
+
+### 例: ここまでの発表をまとめる
+
+```mathematica
+(* 要約・鍵になるポイント・追加情報が要る点 (質問案つき) を別ノートへ (パレットの「📝 まとめ」と同じ) *)
+ListenerSummary[]
 ```
 
 ### 例: SourceVault と連携する
