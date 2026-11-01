@@ -97,7 +97,7 @@ DirectShow 経由で利用可能な映像デバイスの一覧を返す。各要
 録音中なら True を返す。
 
 ### ListenerSourceVaultSession[] → String | None
-現在の SourceVault セッション ID を返す。SourceVault 同期 OFF または未開始なら None。`SourceVaultGetLiveTranscript` 等に渡せる。
+現在の SourceVault セッション ID (`$plSVSession`) を返す。SourceVault 同期 OFF または未開始なら None。`SourceVaultGetLiveTranscript` 等に渡せる。
 
 ## 診断 & テスト
 

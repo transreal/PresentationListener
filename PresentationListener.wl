@@ -620,11 +620,12 @@ plKeep[$plLastNBFolder, None];   (* このカーネルで最後に presentation 
 plKeep[$plSaveWarned, False];    (* 保存先が無い警告は 1 回の収録で 1 度だけ *)
 plNBFolderCandidates[] := {
   {"NotebookFolder", $svNBFolder},
-  {"$SourceVaultDefaultNotebookFolder", Quiet @ Symbol["SourceVault`$SourceVaultDefaultNotebookFolder"]},
-  {"$onWork", Quiet @ Symbol["Global`$onWork"]},
+  (* Symbol[Identity[...]], not a literal Symbol["Ctx`name"]: a literal lookup that once came back unevaluated stays unevaluated on every later call (WL 15, 2026-10-30) *)
+  {"$SourceVaultDefaultNotebookFolder", Quiet @ Symbol[Identity["SourceVault`$SourceVaultDefaultNotebookFolder"]]},
+  {"$onWork", Quiet @ Symbol[Identity["Global`$onWork"]]},
   {"前に保存したフォルダ", $plLastNBFolder},
   {"~/Dropbox/On Work", FileNameJoin[{$HomeDirectory, "Dropbox", "On Work"}]},
-  {"$packageDirectory", Quiet @ Symbol["Global`$packageDirectory"]},
+  {"$packageDirectory", Quiet @ Symbol[Identity["Global`$packageDirectory"]]},
   {"$UserDocumentsDirectory", $UserDocumentsDirectory}}
 plResolveNBFolderInfo[] := SelectFirst[plNBFolderCandidates[], StringQ[#[[2]]] && DirectoryQ[#[[2]]] &, None]
 plResolveNBFolder[] := With[{c = plResolveNBFolderInfo[]}, If[ListQ[c], c[[2]], None]]
