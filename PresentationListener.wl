@@ -2447,8 +2447,8 @@ ShowPalette[] := Module[{srcNB},
             不整合になるため使用しない。 *)
          ClaudeCode`$iPaletteProvider = "claudecode";
          ClaudeCode`$iPaletteModelName = Switch[ClaudeCode`$iPaletteModel,
-           "opus", ClaudeCode`Private`$iModelOpus[[2]],
-           "sonnet", ClaudeCode`Private`$iModelSonnet[[2]],
+           "opus", ClaudeCode`$iModelOpus[[2]],
+           "sonnet", ClaudeCode`$iModelSonnet[[2]],
            _, "Automatic"];
          ClaudeCode`iPaletteSyncClaudeModel[];
          ClaudeCode`iSavePaletteSettings[InputNotebook[]]),
